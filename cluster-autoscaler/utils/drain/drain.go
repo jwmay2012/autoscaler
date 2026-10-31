@@ -67,6 +67,8 @@ const (
 	NotEnoughPdb
 	// UnexpectedError - pod is blocking scale down because of an unexpected error.
 	UnexpectedError
+	// ProtectedController - external policy protects unfinished controller work.
+	ProtectedController
 )
 
 func (e BlockingPodReason) String() string {
@@ -89,6 +91,8 @@ func (e BlockingPodReason) String() string {
 		return "NotEnoughPdb"
 	case UnexpectedError:
 		return "UnexpectedError"
+	case ProtectedController:
+		return "ProtectedController"
 	default:
 		return fmt.Sprintf("unrecognized reason: %d", int(e))
 	}

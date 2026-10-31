@@ -246,8 +246,11 @@ func buildAutoscaler(context ctx.Context, debuggingSnapshotter debuggingsnapshot
 		}
 		cp.Register(policyClient)
 		opts.Processors.DeletionAuthorizer = policyClient
+		if externalConfig.Mode == "enforce" && len(externalConfig.ProtectedControllers) > 0 {
+			opts.DrainabilityRules = append(rules.Rules{policyClient}, drainabilityRules...)
+		}
 		if externalConfig.Planner.Listen != "" {
-			capacityPlanner, err = externalpolicy.NewPlanner(informerFactory, autoscalingOptions, externalConfig.ManagedNodeSelector)
+			capacityPlanner, err = externalpolicy.NewPlanner(informerFactory, autoscalingOptions, externalConfig.ManagedNodeSelector, policyClient)
 			if err != nil {
 				policyClient.CleanUp()
 				return nil, nil, err
