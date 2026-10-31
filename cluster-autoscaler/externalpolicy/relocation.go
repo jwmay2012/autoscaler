@@ -42,7 +42,7 @@ func (p *Planner) ExplainRelocation(ctx context.Context, request *api.Relocation
 		return nil, err
 	}
 	defer done()
-	state, err := p.state([]*api.NodeIdentity{request.Source})
+	state, err := p.state(request.Sources)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +52,7 @@ func (p *Planner) ExplainRelocation(ctx context.Context, request *api.Relocation
 		if err := matchingNode(destination, state.nodes); err != nil {
 			return nil, err
 		}
-		if destination.Uid == request.Source.Uid {
+		if slices.ContainsFunc(state.sources, func(source *api.NodeIdentity) bool { return destination.Uid == source.Uid }) {
 			return nil, status.Error(codes.InvalidArgument, "source cannot be its own destination")
 		}
 		destinations[destination.Name] = true
@@ -62,21 +62,26 @@ func (p *Planner) ExplainRelocation(ctx context.Context, request *api.Relocation
 	}
 	// Evaluate native disruption rules separately from placement. The source
 	// was virtually emptied, so use its original Pod set for drainability.
-	info := framework.NewNodeInfo(state.nodes[request.Source.Name].DeepCopy(), nil)
-	for _, pod := range state.moving {
-		info.AddPod(&framework.PodInfo{Pod: pod})
-	}
 	deleteOptions := options.NewNodeDeleteOptions(p.options)
-	_, _, blocker, disruptionErr := simulator.GetPodsToMove(info, deleteOptions, rules.Default(deleteOptions), p.listers, state.pdbs, time.Now())
-	if disruptionErr != nil {
-		response.OtherDisruptionBlocked = blocker == nil || blocker.Reason != drain.NotEnoughPdb
-		response.Reasons = append(response.Reasons, disruptionErr.Error())
-	}
-	// An early PDB rejection can hide a different disruption restriction.
-	_, _, _, otherErr := simulator.GetPodsToMove(info, deleteOptions, rules.Default(deleteOptions), p.listers, nil, time.Now())
-	if otherErr != nil {
-		response.OtherDisruptionBlocked = true
-		response.Reasons = append(response.Reasons, otherErr.Error())
+	drainRules := append(append(rules.Rules(nil), p.extraRules...), rules.Default(deleteOptions)...)
+	for _, source := range state.sources {
+		info := framework.NewNodeInfo(state.nodes[source.Name].DeepCopy(), nil)
+		for _, pod := range state.moving {
+			if state.origins[string(pod.UID)] == source.Name {
+				info.AddPod(&framework.PodInfo{Pod: pod})
+			}
+		}
+		_, _, blocker, disruptionErr := simulator.GetPodsToMove(info, deleteOptions, drainRules, p.listers, state.pdbs, time.Now())
+		if disruptionErr != nil {
+			response.OtherDisruptionBlocked = response.OtherDisruptionBlocked || blocker == nil || blocker.Reason != drain.NotEnoughPdb
+			response.Reasons = append(response.Reasons, disruptionErr.Error())
+		}
+		// An early PDB rejection can hide another disruption restriction.
+		_, _, _, otherErr := simulator.GetPodsToMove(info, deleteOptions, drainRules, p.listers, nil, time.Now())
+		if otherErr != nil {
+			response.OtherDisruptionBlocked = true
+			response.Reasons = append(response.Reasons, otherErr.Error())
+		}
 	}
 	state.snapshot.Fork()
 	remaining, placed, err := unscheduled(state.snapshot, state.moving, func(node *framework.NodeInfo) bool { return destinations[node.Node().Name] })
@@ -97,6 +102,7 @@ func (p *Planner) ExplainRelocation(ctx context.Context, request *api.Relocation
 	allIncompatible := len(state.moving) > 0
 	for _, pod := range state.moving {
 		item := &api.PodPlacement{Pod: &api.PodReference{Namespace: pod.Namespace, Name: pod.Name, Uid: string(pod.UID), ResourceVersion: pod.ResourceVersion}, Placement: api.PlacementResult_PLACEMENT_UNKNOWN}
+		item.SourceNodeUid = string(state.nodes[state.origins[string(pod.UID)]].UID)
 		allowed, _, _ := state.pdbs.CanRemovePods([]*corev1.Pod{pod})
 		item.PdbBlocked = !allowed
 		response.PdbBlocked = response.PdbBlocked || item.PdbBlocked

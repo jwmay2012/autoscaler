@@ -24,6 +24,7 @@ import (
 
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	testprovider "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/test"
@@ -32,6 +33,8 @@ import (
 	coretest "k8s.io/autoscaler/cluster-autoscaler/core/test"
 	api "k8s.io/autoscaler/cluster-autoscaler/externalpolicy/protos"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/deletion"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	kubeutil "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
 	utiltest "k8s.io/autoscaler/cluster-autoscaler/utils/test"
 	"k8s.io/client-go/kubernetes/fake"
@@ -172,5 +175,56 @@ func TestRemovalAuthorizationIsBoundToRevisionAndFinalBatch(t *testing.T) {
 	client.config.Mode = "enforce"
 	if allowed, _ := client.AuthorizeDeletion(state, []deletion.Batch{{Nodes: input[1:2]}}, false); !allowed {
 		t.Fatal("unmanaged deletion called the policy")
+	}
+}
+
+func TestManagedWorkProtectionIsOptionalAndDoesNotAffectNoticePlanning(t *testing.T) {
+	client, state, nodes := clientFixture(t)
+	client.config.ProtectedControllers = []string{"batch/Job"}
+	pod := utiltest.BuildTestPod("job", 100, 100*1024*1024)
+	pod.Spec.Containers[0].Resources.Limits = pod.Spec.Containers[0].Resources.Requests.DeepCopy()
+	pod.Spec.NodeName = nodes[0].Name
+	controller := true
+	pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: "work", Controller: &controller}}
+	if err := state.ClusterSnapshot.SetClusterState(nodes, []*corev1.Pod{pod}, nil); err != nil {
+		t.Fatal(err)
+	}
+	stub := client.rpc.(policyStub)
+	stub.order = func(_ context.Context, request *api.OrderCandidatesRequest) (*api.OrderCandidatesResponse, error) {
+		response := &api.OrderCandidatesResponse{SnapshotId: request.SnapshotId, PolicyRevision: "policy"}
+		for _, candidate := range request.Candidates {
+			response.OrderedNodeUids = append(response.OrderedNodeUids, candidate.Node.Uid)
+		}
+		return response, nil
+	}
+	client.rpc = stub
+	client.config.Mode = "enforce"
+	if result := client.Drainable(nil, pod, framework.NewTestNodeInfo(nodes[0])); result.Outcome != drainability.BlockDrain {
+		t.Fatal("actual drain did not recheck newly arrived work")
+	}
+	if result := client.Drainable(nil, pod, framework.NewTestNodeInfo(nodes[1])); result.Outcome != drainability.UndefinedOutcome {
+		t.Fatal("work protection changed unmanaged behavior")
+	}
+	for _, mode := range []string{"enforce", "observe"} {
+		client.config.Mode = mode
+		result, err := client.GetScaleDownCandidates(state, nodes)
+		want := 3
+		if mode == "enforce" {
+			want = 2
+		}
+		if err != nil || len(result) != want {
+			t.Fatalf("work protection or observation changed: %+v %v", result, err)
+		}
+	}
+	for _, phase := range []corev1.PodPhase{corev1.PodSucceeded, corev1.PodFailed} {
+		pod.Status.Phase = phase
+		if client.protectedWork(pod) {
+			t.Fatal("completed work remained protected")
+		}
+	}
+	pod.Status.Phase = corev1.PodRunning
+	pod.Annotations = map[string]string{"cluster-autoscaler.kubernetes.io/safe-to-evict": "true"}
+	if client.protectedWork(pod) {
+		t.Fatal("explicit eviction allowance was ignored")
 	}
 }

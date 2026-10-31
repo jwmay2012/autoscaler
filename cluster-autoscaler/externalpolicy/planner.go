@@ -48,6 +48,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot/predicate"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot/store"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability/rules"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/scheduling"
 	kubeutil "k8s.io/autoscaler/cluster-autoscaler/utils/kubernetes"
@@ -62,15 +63,16 @@ import (
 // Its own handle is serialized, while provider publications are immutable.
 type Planner struct {
 	api.UnimplementedCapacityPlannerServer
-	gate      chan struct{}
-	mu        sync.RWMutex
-	view      providerView
-	framework *framework.Handle
-	listers   kubeutil.ListerRegistry
-	synced    func() bool
-	selector  labels.Selector
-	options   config.AutoscalingOptions
-	server    *grpc.Server
+	gate       chan struct{}
+	mu         sync.RWMutex
+	view       providerView
+	framework  *framework.Handle
+	listers    kubeutil.ListerRegistry
+	synced     func() bool
+	selector   labels.Selector
+	options    config.AutoscalingOptions
+	server     *grpc.Server
+	extraRules rules.Rules
 }
 
 type providerView struct {
@@ -98,7 +100,7 @@ type planningState struct {
 	graceBySource map[string]time.Duration
 }
 
-func NewPlanner(factory informers.SharedInformerFactory, options config.AutoscalingOptions, selector string) (*Planner, error) {
+func NewPlanner(factory informers.SharedInformerFactory, options config.AutoscalingOptions, selector string, extraRules ...rules.Rule) (*Planner, error) {
 	if options.DynamicResourceAllocationEnabled {
 		return nil, fmt.Errorf("external planner does not yet support DRA snapshots")
 	}
@@ -115,7 +117,7 @@ func NewPlanner(factory informers.SharedInformerFactory, options config.Autoscal
 		factory.Policy().V1().PodDisruptionBudgets().Informer().HasSynced, factory.Apps().V1().ReplicaSets().Informer().HasSynced,
 		factory.Apps().V1().StatefulSets().Informer().HasSynced, factory.Batch().V1().Jobs().Informer().HasSynced,
 		factory.Core().V1().ReplicationControllers().Informer().HasSynced, factory.Apps().V1().DaemonSets().Informer().HasSynced}
-	return &Planner{gate: make(chan struct{}, 1), framework: handle, listers: listers, selector: managed, options: options,
+	return &Planner{gate: make(chan struct{}, 1), framework: handle, listers: listers, selector: managed, options: options, extraRules: append(rules.Rules(nil), extraRules...),
 		synced: func() bool {
 			for _, ready := range syncs {
 				if !ready() {
@@ -421,6 +423,12 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 	committed := len(state.nodes)
 	for id, original := range view.groups {
 		copy := *original
+		if ceiling, exists := request.MaximumTargetSizes[id]; exists {
+			if ceiling < 0 || !slices.Contains(request.AllowedNodeGroupIds, id) {
+				return nil, status.Error(codes.InvalidArgument, "invalid hypothetical node group ceiling")
+			}
+			copy.maximum = int(ceiling)
+		}
 		groups[id] = &copy
 		pending := max(0, int(request.PendingTargetSizes[id])-original.target)
 		incoming := view.upcoming[id] + pending

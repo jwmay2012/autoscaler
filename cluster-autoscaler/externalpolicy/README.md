@@ -11,6 +11,10 @@ authorization of the actual removal batch after deletion budgets. Authorization
 cannot add nodes to the batch or bypass a native constraint. An unavailable or
 invalid policy defers voluntary removal of enrolled nodes. Enrollment is known
 locally through a configured Node label selector.
+An optional `protectedControllers` list (for example `batch/Job`) excludes
+enrolled nodes with unfinished controller-owned work from voluntary candidates.
+A Pod can explicitly allow interruption with the native `safe-to-evict: "true"`
+annotation. This does not change loss planning or emergency preemption drains.
 
 The read-only planner supports impending node loss without waiting for Pods to
 become Pending. It builds an independent scheduling snapshot, virtually removes
@@ -24,6 +28,12 @@ Native backoff, group health, node and resource limits apply to additions. A
 NotReady or disappearing node remains a topology domain but never a destination,
 even for Pods with blanket tolerations. This conservative topology model can
 temporarily require more room under hard topology spread.
+The caller can supply hypothetical per-group ceilings for impending-loss
+planning instead of waiting for a previous native headroom grant to propagate.
+These are planning inputs, never permissions to mutate infrastructure. The
+caller must atomically commit the selected target and effective bounds, and
+charge the complete request to its shared envelope. Cluster node/resource
+limits and provider backoff are never overridden.
 
 Relocation explanations distinguish disruption restrictions from scheduling
 feasibility. Ignoring PDBs for a diagnostic simulation never authorizes an

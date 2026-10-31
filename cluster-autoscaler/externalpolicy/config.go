@@ -31,16 +31,19 @@ import (
 // Config is intentionally independent of any policy controller or cloud.
 // Mode applies on the CA side: observation cannot influence native decisions.
 type Config struct {
-	APIVersion          string        `json:"apiVersion"`
-	Mode                string        `json:"mode"`
-	Endpoint            string        `json:"endpoint"`
-	ServerName          string        `json:"serverName"`
-	CAFile              string        `json:"caFile"`
-	ClientCertFile      string        `json:"clientCertFile"`
-	ClientKeyFile       string        `json:"clientKeyFile"`
-	ManagedNodeSelector string        `json:"managedNodeSelector"`
-	Timeout             string        `json:"timeout"`
-	Planner             PlannerConfig `json:"planner"`
+	APIVersion          string `json:"apiVersion"`
+	Mode                string `json:"mode"`
+	Endpoint            string `json:"endpoint"`
+	ServerName          string `json:"serverName"`
+	CAFile              string `json:"caFile"`
+	ClientCertFile      string `json:"clientCertFile"`
+	ClientKeyFile       string `json:"clientKeyFile"`
+	ManagedNodeSelector string `json:"managedNodeSelector"`
+	// Optional controller group/kinds whose unfinished Pods must not be
+	// interrupted by managed voluntary scale-down, unless explicitly evictable.
+	ProtectedControllers []string      `json:"protectedControllers"`
+	Timeout              string        `json:"timeout"`
+	Planner              PlannerConfig `json:"planner"`
 }
 
 // PlannerConfig controls the optional mutually authenticated read-only server.

@@ -188,6 +188,30 @@ func TestReplacementCannotBorrowAnotherEnvelope(t *testing.T) {
 	}
 }
 
+func TestLossPlanningDoesNotWaitForOrdinaryScaleUpCeilings(t *testing.T) {
+	source := plannerNode("source")
+	pods := []*corev1.Pod{plannerPod("a", source.Name), plannerPod("b", source.Name), plannerPod("c", source.Name)}
+	planner, _ := plannerFixture(t, []*corev1.Node{source}, pods)
+	publishGroups(t, planner, map[string]*corev1.Node{"preferred": plannerNode("preferred-template"), "fallback": plannerNode("fallback-template")}, nil, nil)
+	planner.view.groups["preferred"].maximum = 0
+	request := replacementRequest(source)
+	request.MaximumTargetSizes = map[string]int32{"preferred": 2}
+	request.Budgets = []*api.ExpansionBudget{{NodeGroupIds: []string{"preferred", "fallback"}, MaximumAdditionalNodes: 2}}
+	response, err := planner.PlanReplacement(context.Background(), request)
+	if err != nil || !response.Covered || len(response.Additions) != 1 || response.Additions[0].NodeGroupId != "preferred" || response.Additions[0].Count != 2 {
+		t.Fatalf("cached normal ceiling delayed or downgraded the replacement: %+v %v", response, err)
+	}
+	if planner.view.groups["preferred"].maximum != 0 {
+		t.Fatal("hypothetical planning changed native provider bounds")
+	}
+	request.MaximumTargetSizes["preferred"] = 20
+	request.Budgets[0].MaximumAdditionalNodes = 0
+	response, err = planner.PlanReplacement(context.Background(), request)
+	if err != nil || response.Covered || len(response.Additions) != 0 {
+		t.Fatal("hypothetical ceiling bypassed the shared budget")
+	}
+}
+
 func TestEarlyLossDoesNotDrainAnotherSourceBeforeItsDeadline(t *testing.T) {
 	a, b := plannerNode("a"), plannerNode("b")
 	planner, _ := plannerFixture(t, []*corev1.Node{a, b}, []*corev1.Pod{plannerPod("early", a.Name), plannerPod("later", b.Name)})
@@ -198,6 +222,22 @@ func TestEarlyLossDoesNotDrainAnotherSourceBeforeItsDeadline(t *testing.T) {
 	}
 	if len(response.Nodes) != 2 || !response.Nodes[1].Waiting || response.Nodes[1].DeadlineReached {
 		t.Fatal("per-source waiting state was lost")
+	}
+}
+
+func TestRelocationSourcesDoNotReserveTheSameRoom(t *testing.T) {
+	a, b, x, y := plannerNode("source-a"), plannerNode("source-b"), plannerNode("destination-a"), plannerNode("destination-b")
+	pods := []*corev1.Pod{plannerPod("a1", a.Name), plannerPod("a2", a.Name), plannerPod("b1", b.Name), plannerPod("b2", b.Name)}
+	budget := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "protect", Namespace: "default"}, Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: pods[0].Labels}}, Status: policyv1.PodDisruptionBudgetStatus{DisruptionsAllowed: 0}}
+	planner, _ := plannerFixture(t, []*corev1.Node{a, b, x, y}, pods, budget)
+	response, err := planner.ExplainRelocation(context.Background(), &api.RelocationRequest{Sources: []*api.NodeIdentity{identity(a, "source"), identity(b, "source")}, Destinations: []*api.NodeIdentity{identity(x, "target"), identity(y, "target")}})
+	if err != nil || !response.PdbBlocked || response.Placement != api.PlacementResult_PLACEMENT_FEASIBLE || len(response.UsedNodeUids) != 2 {
+		t.Fatalf("two blocked sources shared one reservation: %+v %v", response, err)
+	}
+	for _, work := range response.Pods {
+		if work.SourceNodeUid == "" || !work.PdbBlocked {
+			t.Fatal("lost the source identity or disruption restriction")
+		}
 	}
 }
 
@@ -219,7 +259,7 @@ func TestRelocationPreservesCompatiblePDBWorkAndUnknownTransientState(t *testing
 			}
 			budget := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "protect", Namespace: "default"}, Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: pod.Labels}}, Status: policyv1.PodDisruptionBudgetStatus{DisruptionsAllowed: 0}}
 			planner, _ := plannerFixture(t, []*corev1.Node{source, destination}, pods, budget)
-			result, err := planner.ExplainRelocation(context.Background(), &api.RelocationRequest{Source: identity(source, "source"), Destinations: []*api.NodeIdentity{identity(destination, "target")}})
+			result, err := planner.ExplainRelocation(context.Background(), &api.RelocationRequest{Sources: []*api.NodeIdentity{identity(source, "source")}, Destinations: []*api.NodeIdentity{identity(destination, "target")}})
 			if err != nil || !result.PdbBlocked || result.Placement == api.PlacementResult_PLACEMENT_INCOMPATIBLE {
 				t.Fatalf("compatible or uncertain work lost retention: %+v %v", result, err)
 			}
@@ -392,7 +432,7 @@ func TestRelocationDistinguishesPDBFromHardPlacement(t *testing.T) {
 		pod := plannerPod("work", source.Name)
 		budget := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "protect", Namespace: "default"}, Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: pod.Labels}}, Status: policyv1.PodDisruptionBudgetStatus{DisruptionsAllowed: 0}}
 		planner, _ := plannerFixture(t, []*corev1.Node{source, destination}, []*corev1.Pod{pod}, budget)
-		request := &api.RelocationRequest{Source: identity(source, "source"), Destinations: []*api.NodeIdentity{identity(destination, "target")}}
+		request := &api.RelocationRequest{Sources: []*api.NodeIdentity{identity(source, "source")}, Destinations: []*api.NodeIdentity{identity(destination, "target")}}
 		result, err := planner.ExplainRelocation(context.Background(), request)
 		want := api.PlacementResult_PLACEMENT_FEASIBLE
 		if tainted {
