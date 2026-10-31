@@ -154,6 +154,7 @@ message PodPlacement {
   bool pdb_blocked = 3;
   string destination_node_uid = 4;
   string source_node_uid = 5;
+  bool other_disruption_blocked = 6;
 }
 
 message PodReference {

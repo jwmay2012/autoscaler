@@ -64,7 +64,11 @@ func (p *Planner) ExplainRelocation(ctx context.Context, request *api.Relocation
 	// was virtually emptied, so use its original Pod set for drainability.
 	deleteOptions := options.NewNodeDeleteOptions(p.options)
 	drainRules := append(append(rules.Rules(nil), p.extraRules...), rules.Default(deleteOptions)...)
+	otherBlocked := map[string]bool{}
 	for _, source := range state.sources {
+		if err := ctx.Err(); err != nil {
+			return nil, status.FromContextError(err).Err()
+		}
 		info := framework.NewNodeInfo(state.nodes[source.Name].DeepCopy(), nil)
 		for _, pod := range state.moving {
 			if state.origins[string(pod.UID)] == source.Name {
@@ -80,12 +84,16 @@ func (p *Planner) ExplainRelocation(ctx context.Context, request *api.Relocation
 		_, _, _, otherErr := simulator.GetPodsToMove(info, deleteOptions, drainRules, p.listers, nil, time.Now())
 		if otherErr != nil {
 			response.OtherDisruptionBlocked = true
+			otherBlocked[source.Name] = true
 			response.Reasons = append(response.Reasons, otherErr.Error())
 		}
 	}
 	state.snapshot.Fork()
-	remaining, placed, err := unscheduled(state.snapshot, state.moving, func(node *framework.NodeInfo) bool { return destinations[node.Node().Name] })
+	remaining, placed, err := unscheduled(state.snapshot, state.moving, func(node *framework.NodeInfo) bool { return ctx.Err() == nil && destinations[node.Node().Name] })
 	state.snapshot.Revert()
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	if err != nil {
 		response.Reasons = append(response.Reasons, err.Error())
 		return response, nil
@@ -101,14 +109,17 @@ func (p *Planner) ExplainRelocation(ctx context.Context, request *api.Relocation
 	// ineligibility to a policy deciding whether to retain scarce capacity.
 	allIncompatible := len(state.moving) > 0
 	for _, pod := range state.moving {
+		if err := ctx.Err(); err != nil {
+			return nil, status.FromContextError(err).Err()
+		}
 		item := &api.PodPlacement{Pod: &api.PodReference{Namespace: pod.Namespace, Name: pod.Name, Uid: string(pod.UID), ResourceVersion: pod.ResourceVersion}, Placement: api.PlacementResult_PLACEMENT_UNKNOWN}
 		item.SourceNodeUid = string(state.nodes[state.origins[string(pod.UID)]].UID)
+		item.OtherDisruptionBlocked = otherBlocked[state.origins[string(pod.UID)]]
 		allowed, _, _ := state.pdbs.CanRemovePods([]*corev1.Pod{pod})
 		item.PdbBlocked = !allowed
 		response.PdbBlocked = response.PdbBlocked || item.PdbBlocked
-		if allowed {
-			state.pdbs.RemovePods([]*corev1.Pod{pod})
-		}
+		// This describes what is blocked now, not a request to evict the whole
+		// diagnostic batch simultaneously. Only PlanDrain spends its PDB budget.
 		for _, assignment := range placed {
 			if assignment.Pod.UID == pod.UID {
 				item.Placement = api.PlacementResult_PLACEMENT_FEASIBLE
@@ -120,6 +131,9 @@ func (p *Planner) ExplainRelocation(ctx context.Context, request *api.Relocation
 		}
 		incompatibleEverywhere := true
 		for name := range destinations {
+			if err := ctx.Err(); err != nil {
+				return nil, status.FromContextError(err).Err()
+			}
 			failure := state.snapshot.CheckPredicates(pod, name)
 			if failure != nil && failure.FailingPredicateName() == "TaintToleration" {
 				// Transient lifecycle taints do not prove that the offering is
