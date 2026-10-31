@@ -20,6 +20,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
+	"sort"
 )
 
 // destinationSnapshot keeps unavailable Nodes visible to topology predicates,
@@ -45,7 +46,23 @@ func (s *destinationSnapshot) SchedulePod(pod *corev1.Pod, name string) clusters
 }
 
 func (s *destinationSnapshot) SchedulePodOnAnyNodeMatching(pod *corev1.Pod, match func(*framework.NodeInfo) bool) (string, clustersnapshot.SchedulingError) {
-	return s.ClusterSnapshot.SchedulePodOnAnyNodeMatching(pod, func(node *framework.NodeInfo) bool {
-		return !s.unavailable[node.Node().Name] && match(node)
-	})
+	nodes, err := s.ListNodeInfos()
+	if err != nil {
+		return "", clustersnapshot.NewSchedulingInternalError(pod, err.Error())
+	}
+	// Native store iteration and the plugin runner's rotating starting index
+	// are useful in the live loop, but would make identical read-only retries
+	// reserve different destinations. Keep this planner's first-fit order stable.
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Node().Name < nodes[j].Node().Name })
+	for _, node := range nodes {
+		if s.unavailable[node.Node().Name] || !match(node) {
+			continue
+		}
+		if err := s.SchedulePod(pod, node.Node().Name); err == nil {
+			return node.Node().Name, nil
+		} else if err.Type() == clustersnapshot.SchedulingInternalError {
+			return "", err
+		}
+	}
+	return "", clustersnapshot.NewNoNodesPassingPredicatesFoundError(pod)
 }
