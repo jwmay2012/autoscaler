@@ -142,8 +142,9 @@ var (
 
 	expanderFlag = flag.String("expander", expander.LeastWasteExpanderName, "Type of node group expander to be used in scale up. Available values: ["+strings.Join(expander.AvailableExpanders, ",")+"]. Specifying multiple values separated by commas will call the expanders in succession until there is only one option remaining. Ties still existing after this process are broken randomly.")
 
-	grpcExpanderCert = flag.String("grpc-expander-cert", "", "Path to cert used by gRPC server over TLS")
-	grpcExpanderURL  = flag.String("grpc-expander-url", "", "URL to reach gRPC expander server.")
+	grpcExpanderCert     = flag.String("grpc-expander-cert", "", "Path to cert used by gRPC server over TLS")
+	grpcExpanderURL      = flag.String("grpc-expander-url", "", "URL to reach gRPC expander server.")
+	externalPolicyConfig = flag.String("external-policy-config", "", "Optional external capacity policy and read-only planner configuration file.")
 
 	ignoreDaemonSetsUtilization = flag.Bool("ignore-daemonsets-utilization", false,
 		"Should CA ignore DaemonSet pods when calculating resource utilization for scaling down")
@@ -302,6 +303,7 @@ func createAutoscalingOptions() config.AutoscalingOptions {
 		ExpanderNames:                    *expanderFlag,
 		GRPCExpanderCert:                 *grpcExpanderCert,
 		GRPCExpanderURL:                  *grpcExpanderURL,
+		ExternalPolicyConfig:             *externalPolicyConfig,
 		IgnoreMirrorPodsUtilization:      *ignoreMirrorPodsUtilization,
 		MaxBulkSoftTaintCount:            *maxBulkSoftTaintCount,
 		MaxBulkSoftTaintTime:             *maxBulkSoftTaintTime,

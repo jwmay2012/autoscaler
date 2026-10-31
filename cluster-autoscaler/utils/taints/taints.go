@@ -194,6 +194,15 @@ func AddTaints(node *apiv1.Node, client kube_client.Interface, taints []apiv1.Ta
 				klog.Warningf("Error while adding %v taints on node %v: %v", strings.Join(taintKeys(taints), ","), node.Name, err)
 				return nil, fmt.Errorf("failed to get node %v: %v", node.Name, err)
 			}
+			if node.UID != "" && freshNode.UID != node.UID {
+				return nil, fmt.Errorf("node %s was replaced while adding taints", node.Name)
+			}
+			for _, taint := range taints {
+				if taint.Key == ToBeDeletedTaint && ((node.Spec.ProviderID != "" && freshNode.Spec.ProviderID != node.Spec.ProviderID) ||
+					(node.Status.NodeInfo.BootID != "" && freshNode.Status.NodeInfo.BootID != node.Status.NodeInfo.BootID)) {
+					return nil, fmt.Errorf("node %s changed instance or boot during retirement", node.Name)
+				}
+			}
 		}
 
 		if !addTaintsToSpec(freshNode, taints, cordonNode) {

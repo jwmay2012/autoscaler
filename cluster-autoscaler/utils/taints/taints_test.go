@@ -53,6 +53,37 @@ func TestMarkNodes(t *testing.T) {
 	assert.False(t, HasDeletionCandidateTaint(updatedNode))
 }
 
+func TestRetirementRejectsReplacedNodeOrBootAfterConflict(t *testing.T) {
+	defer setConflictRetryInterval(setConflictRetryInterval(time.Millisecond))
+	for _, changed := range []string{"uid", "boot", "provider"} {
+		t.Run(changed, func(t *testing.T) {
+			node := BuildTestNode("worker", 1000, 1000)
+			node.UID = "original"
+			node.Spec.ProviderID = "provider://original"
+			node.Status.NodeInfo.BootID = "boot-1"
+			current := node.DeepCopy()
+			switch changed {
+			case "uid":
+				current.UID = "replacement"
+			case "boot":
+				current.Status.NodeInfo.BootID = "boot-2"
+			case "provider":
+				current.Spec.ProviderID = "provider://replacement"
+			}
+			client := fake.NewSimpleClientset(current)
+			attempts := 0
+			client.PrependReactor("update", "nodes", func(action core.Action) (bool, runtime.Object, error) {
+				attempts++
+				return true, nil, errors.NewConflict(apiv1.Resource("nodes"), "worker", fmt.Errorf("changed"))
+			})
+			_, err := MarkToBeDeleted(node, client, false)
+			require.Error(t, err)
+			assert.Equal(t, 1, attempts)
+			assert.False(t, HasToBeDeletedTaint(getNode(t, client, "worker")))
+		})
+	}
+}
+
 func TestSoftMarkNodes(t *testing.T) {
 	defer setConflictRetryInterval(setConflictRetryInterval(time.Millisecond))
 	node := BuildTestNode("node", 1000, 1000)

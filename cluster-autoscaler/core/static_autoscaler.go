@@ -35,12 +35,14 @@ import (
 	scaledownstatus "k8s.io/autoscaler/cluster-autoscaler/core/scaledown/status"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaleup"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaleup/orchestrator"
+	"k8s.io/autoscaler/cluster-autoscaler/core/scaleup/resource"
 	core_utils "k8s.io/autoscaler/cluster-autoscaler/core/utils"
 	"k8s.io/autoscaler/cluster-autoscaler/debuggingsnapshot"
 	"k8s.io/autoscaler/cluster-autoscaler/estimator"
 	"k8s.io/autoscaler/cluster-autoscaler/expander"
 	"k8s.io/autoscaler/cluster-autoscaler/metrics"
 	"k8s.io/autoscaler/cluster-autoscaler/observers/loopstart"
+	"k8s.io/autoscaler/cluster-autoscaler/observers/planning"
 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/status"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator"
@@ -156,6 +158,9 @@ func NewStaticAutoscaler(
 	}
 	clusterStateRegistry := clusterstate.NewClusterStateRegistry(cloudProvider, clusterStateConfig, autoscalingKubeClients.LogRecorder, backoff, processors.NodeGroupConfigProcessor, processors.AsyncNodeGroupStateChecker)
 	processorCallbacks := newStaticAutoscalerProcessorCallbacks()
+	if processors.PlanningObserver != nil {
+		expanderStrategy = expander.Synchronized(expanderStrategy)
+	}
 	autoscalingContext := context.NewAutoscalingContext(
 		opts,
 		fwHandle,
@@ -179,7 +184,7 @@ func NewStaticAutoscaler(
 	processorCallbacks.scaleDownPlanner = scaleDownPlanner
 
 	ndt := deletiontracker.NewNodeDeletionTracker(0 * time.Second)
-	scaleDownActuator := actuation.NewActuator(autoscalingContext, processors.ScaleStateNotifier, ndt, deleteOptions, drainabilityRules, processors.NodeGroupConfigProcessor)
+	scaleDownActuator := actuation.NewActuator(autoscalingContext, processors.ScaleStateNotifier, ndt, deleteOptions, drainabilityRules, processors.NodeGroupConfigProcessor, processors.DeletionAuthorizer)
 	autoscalingContext.ScaleDownActuator = scaleDownActuator
 
 	if scaleUpOrchestrator == nil {
@@ -364,6 +369,31 @@ func (a *StaticAutoscaler) RunOnce(currentTime time.Time) caerrors.AutoscalerErr
 	if typedErr := a.updateClusterState(allNodes, nodeInfosForGroups, currentTime); typedErr != nil {
 		klog.Errorf("Failed to update cluster state: %v", typedErr)
 		return typedErr
+	}
+	// Read-only loss planning must remain available even when the ordinary
+	// autoscaling health gate defers a loop because several nodes are unready.
+	if a.processors.PlanningObserver != nil {
+		incoming, registered := a.clusterStateRegistry.GetUpcomingNodes()
+		view := planning.Snapshot{ObservedAt: currentTime, Templates: nodeInfosForGroups, Upcoming: incoming, Registered: registered,
+			SafeToScale: map[string]bool{}, ResourceDelta: map[string]map[string]int64{}, PDBs: a.RemainingPdbTracker.GetPdbs()}
+		resources := resource.NewManager(a.processors.CustomResourcesProcessor)
+		left, limitErr := resources.ResourcesLeft(autoscalingContext, nodeInfosForGroups, allNodes)
+		view.ResourcesLeft = left
+		if limitErr != nil {
+			view.LimitsError = limitErr.Error()
+		}
+		for _, group := range a.CloudProvider.NodeGroups() {
+			view.SafeToScale[group.Id()] = a.clusterStateRegistry.NodeGroupScaleUpSafety(group, currentTime).SafeToScale
+			if template := nodeInfosForGroups[group.Id()]; template != nil {
+				delta, err := resources.DeltaForNode(autoscalingContext, template, group)
+				if err != nil {
+					view.SafeToScale[group.Id()] = false
+				} else {
+					view.ResourceDelta[group.Id()] = delta
+				}
+			}
+		}
+		a.processors.PlanningObserver.Observe(autoscalingContext, view)
 	}
 	metrics.UpdateDurationFromStart(metrics.UpdateState, stateUpdateStart)
 
