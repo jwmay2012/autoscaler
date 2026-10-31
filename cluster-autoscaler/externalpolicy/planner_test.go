@@ -241,6 +241,22 @@ func TestRelocationSourcesDoNotReserveTheSameRoom(t *testing.T) {
 	}
 }
 
+func TestJointRelocationDoesNotInventAPDBBlockForSequentialDrains(t *testing.T) {
+	a, b, target := plannerNode("a"), plannerNode("b"), plannerNode("target")
+	pods := []*corev1.Pod{plannerPod("a", a.Name), plannerPod("b", b.Name)}
+	budget := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Name: "protect", Namespace: "default"}, Spec: policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: pods[0].Labels}}, Status: policyv1.PodDisruptionBudgetStatus{DisruptionsAllowed: 1}}
+	planner, _ := plannerFixture(t, []*corev1.Node{a, b, target}, pods, budget)
+	result, err := planner.ExplainRelocation(context.Background(), &api.RelocationRequest{Sources: []*api.NodeIdentity{identity(a, "source"), identity(b, "source")}, Destinations: []*api.NodeIdentity{identity(target, "target")}})
+	if err != nil || result.PdbBlocked || result.Placement != api.PlacementResult_PLACEMENT_FEASIBLE {
+		t.Fatalf("ordinary sequential drains became an indefinite reservation: %+v %v", result, err)
+	}
+	for _, work := range result.Pods {
+		if work.PdbBlocked {
+			t.Fatal("diagnostic consumed another source's PDB allowance")
+		}
+	}
+}
+
 func TestRelocationPreservesCompatiblePDBWorkAndUnknownTransientState(t *testing.T) {
 	for _, mode := range []string{"mixed", "transient", "not-safe-to-evict"} {
 		t.Run(mode, func(t *testing.T) {
