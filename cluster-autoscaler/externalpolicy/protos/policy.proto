@@ -161,6 +161,16 @@ message DrainRequest {
   // Same complete set of concurrent losses used by PlanReplacement.
   repeated NodeIdentity sources = 1;
   int64 deadline_unix_millis = 2;
+  // Per-source loss deadlines, keyed by Node UID. The common deadline is used
+  // for omitted entries. An earlier loss never authorizes another node's drain.
+  map<string, int64> source_deadlines_unix_millis = 3;
+}
+
+message NodeDrainStatus {
+  string node_uid = 1;
+  bool waiting = 2;
+  bool deadline_reached = 3;
+  int64 latest_drain_start_unix_millis = 4;
 }
 
 message DrainResponse {
@@ -171,6 +181,7 @@ message DrainResponse {
   int64 latest_drain_start_unix_millis = 5;
   repeated PodReference evictions = 6;
   repeated string reasons = 7;
+  repeated NodeDrainStatus nodes = 8;
 }
 
 // CapacityPlanner is read-only. It uses CA's scheduler framework and estimator;

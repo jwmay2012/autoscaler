@@ -85,15 +85,17 @@ type providerView struct {
 }
 
 type planningState struct {
-	snapshot    clustersnapshot.ClusterSnapshot
-	nodes       map[string]*corev1.Node
-	moving      []*corev1.Pod
-	pending     []*corev1.Pod
-	pdbs        pdb.RemainingPdbTracker
-	id          string
-	sources     []*api.NodeIdentity
-	grace       time.Duration
-	unavailable map[string]bool
+	snapshot      clustersnapshot.ClusterSnapshot
+	nodes         map[string]*corev1.Node
+	moving        []*corev1.Pod
+	pending       []*corev1.Pod
+	pdbs          pdb.RemainingPdbTracker
+	id            string
+	sources       []*api.NodeIdentity
+	grace         time.Duration
+	unavailable   map[string]bool
+	origins       map[string]string
+	graceBySource map[string]time.Duration
 }
 
 func NewPlanner(factory informers.SharedInformerFactory, options config.AutoscalingOptions, selector string) (*Planner, error) {
@@ -226,7 +228,7 @@ func (p *Planner) state(sources []*api.NodeIdentity) (*planningState, error) {
 			}
 		}
 	}
-	result := &planningState{nodes: map[string]*corev1.Node{}, pdbs: pdb.NewBasicRemainingPdbTracker(), unavailable: map[string]bool{}}
+	result := &planningState{nodes: map[string]*corev1.Node{}, pdbs: pdb.NewBasicRemainingPdbTracker(), unavailable: map[string]bool{}, origins: map[string]string{}, graceBySource: map[string]time.Duration{}}
 	if err := result.pdbs.SetPdbs(budgets); err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
@@ -284,6 +286,7 @@ func (p *Planner) state(sources []*api.NodeIdentity) (*planningState, error) {
 				copy := pod.DeepCopy()
 				copy.Spec.NodeName = ""
 				result.moving = append(result.moving, copy)
+				result.origins[string(pod.UID)] = pod.Spec.NodeName
 				grace := int64(30)
 				if pod.Spec.TerminationGracePeriodSeconds != nil {
 					grace = max(0, *pod.Spec.TerminationGracePeriodSeconds)
@@ -292,6 +295,7 @@ func (p *Planner) state(sources []*api.NodeIdentity) (*planningState, error) {
 					grace = min(grace, int64(p.options.MaxGracefulTerminationSec))
 				}
 				result.grace = max(result.grace, time.Duration(grace)*time.Second)
+				result.graceBySource[pod.Spec.NodeName] = max(result.graceBySource[pod.Spec.NodeName], time.Duration(grace)*time.Second)
 			}
 			continue
 		}

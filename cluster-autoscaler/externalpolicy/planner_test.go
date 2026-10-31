@@ -188,6 +188,19 @@ func TestReplacementCannotBorrowAnotherEnvelope(t *testing.T) {
 	}
 }
 
+func TestEarlyLossDoesNotDrainAnotherSourceBeforeItsDeadline(t *testing.T) {
+	a, b := plannerNode("a"), plannerNode("b")
+	planner, _ := plannerFixture(t, []*corev1.Node{a, b}, []*corev1.Pod{plannerPod("early", a.Name), plannerPod("later", b.Name)})
+	request := &api.DrainRequest{Sources: []*api.NodeIdentity{identity(a, "source"), identity(b, "source")}, DeadlineUnixMillis: time.Now().Add(20 * time.Second).UnixMilli(), SourceDeadlinesUnixMillis: map[string]int64{string(b.UID): time.Now().Add(2 * time.Minute).UnixMilli()}}
+	response, err := planner.PlanDrain(context.Background(), request)
+	if err != nil || len(response.Evictions) != 1 || response.Evictions[0].Name != "early" || response.WaitForCapacity {
+		t.Fatalf("one deadline authorized another source or blocked its own drain: %+v %v", response, err)
+	}
+	if len(response.Nodes) != 2 || !response.Nodes[1].Waiting || response.Nodes[1].DeadlineReached {
+		t.Fatal("per-source waiting state was lost")
+	}
+}
+
 func TestRelocationPreservesCompatiblePDBWorkAndUnknownTransientState(t *testing.T) {
 	for _, mode := range []string{"mixed", "transient", "not-safe-to-evict"} {
 		t.Run(mode, func(t *testing.T) {
