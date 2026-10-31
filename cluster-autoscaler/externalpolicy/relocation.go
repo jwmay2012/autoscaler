@@ -1,0 +1,200 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package externalpolicy
+
+import (
+	"context"
+	"slices"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	corev1 "k8s.io/api/core/v1"
+	api "k8s.io/autoscaler/cluster-autoscaler/externalpolicy/protos"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability/rules"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/options"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/scheduling"
+	"k8s.io/autoscaler/cluster-autoscaler/utils/drain"
+	"k8s.io/autoscaler/cluster-autoscaler/utils/taints"
+	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/volumebinding"
+)
+
+func (p *Planner) ExplainRelocation(ctx context.Context, request *api.RelocationRequest) (*api.RelocationResponse, error) {
+	done, err := p.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	state, err := p.state([]*api.NodeIdentity{request.Source})
+	if err != nil {
+		return nil, err
+	}
+	response := &api.RelocationResponse{SnapshotId: state.id, Placement: api.PlacementResult_PLACEMENT_UNKNOWN}
+	destinations := map[string]bool{}
+	for _, destination := range request.Destinations {
+		if err := matchingNode(destination, state.nodes); err != nil {
+			return nil, err
+		}
+		if destination.Uid == request.Source.Uid {
+			return nil, status.Error(codes.InvalidArgument, "source cannot be its own destination")
+		}
+		destinations[destination.Name] = true
+	}
+	if len(destinations) == 0 {
+		return nil, status.Error(codes.InvalidArgument, "destination identities are required")
+	}
+	// Evaluate native disruption rules separately from placement. The source
+	// was virtually emptied, so use its original Pod set for drainability.
+	info := framework.NewNodeInfo(state.nodes[request.Source.Name].DeepCopy(), nil)
+	for _, pod := range state.moving {
+		info.AddPod(&framework.PodInfo{Pod: pod})
+	}
+	deleteOptions := options.NewNodeDeleteOptions(p.options)
+	_, _, blocker, disruptionErr := simulator.GetPodsToMove(info, deleteOptions, rules.Default(deleteOptions), p.listers, state.pdbs, time.Now())
+	if disruptionErr != nil {
+		response.OtherDisruptionBlocked = blocker == nil || blocker.Reason != drain.NotEnoughPdb
+		response.Reasons = append(response.Reasons, disruptionErr.Error())
+	}
+	// An early PDB rejection can hide a different disruption restriction.
+	_, _, _, otherErr := simulator.GetPodsToMove(info, deleteOptions, rules.Default(deleteOptions), p.listers, nil, time.Now())
+	if otherErr != nil {
+		response.OtherDisruptionBlocked = true
+		response.Reasons = append(response.Reasons, otherErr.Error())
+	}
+	state.snapshot.Fork()
+	remaining, placed, err := unscheduled(state.snapshot, state.moving, func(node *framework.NodeInfo) bool { return destinations[node.Node().Name] })
+	state.snapshot.Revert()
+	if err != nil {
+		response.Reasons = append(response.Reasons, err.Error())
+		return response, nil
+	}
+	response.Placement = api.PlacementResult_PLACEMENT_INFEASIBLE
+	if len(remaining) == 0 {
+		response.Placement = api.PlacementResult_PLACEMENT_FEASIBLE
+	} else {
+		response.Reasons = append(response.Reasons, "the complete source workload does not currently fit on the supplied destinations")
+	}
+	// Only native hard-constraint failures prove incompatibility. A capacity
+	// shortage or an unknown predicate must not be presented as permanent
+	// ineligibility to a policy deciding whether to retain scarce capacity.
+	allIncompatible := len(state.moving) > 0
+	for _, pod := range state.moving {
+		item := &api.PodPlacement{Pod: &api.PodReference{Namespace: pod.Namespace, Name: pod.Name, Uid: string(pod.UID), ResourceVersion: pod.ResourceVersion}, Placement: api.PlacementResult_PLACEMENT_UNKNOWN}
+		allowed, _, _ := state.pdbs.CanRemovePods([]*corev1.Pod{pod})
+		item.PdbBlocked = !allowed
+		response.PdbBlocked = response.PdbBlocked || item.PdbBlocked
+		if allowed {
+			state.pdbs.RemovePods([]*corev1.Pod{pod})
+		}
+		for _, assignment := range placed {
+			if assignment.Pod.UID == pod.UID {
+				item.Placement = api.PlacementResult_PLACEMENT_FEASIBLE
+				item.DestinationNodeUid = string(state.nodes[assignment.NodeName].UID)
+				if !slices.Contains(response.UsedNodeUids, item.DestinationNodeUid) {
+					response.UsedNodeUids = append(response.UsedNodeUids, item.DestinationNodeUid)
+				}
+			}
+		}
+		incompatibleEverywhere := true
+		for name := range destinations {
+			failure := state.snapshot.CheckPredicates(pod, name)
+			if failure != nil && failure.FailingPredicateName() == "TaintToleration" {
+				// Transient lifecycle taints do not prove that the offering is
+				// unsuitable. Remain unknown until native fit can evaluate it.
+				node := state.nodes[name]
+				if len(taints.SanitizeTaints(node.Spec.Taints, taints.NewTaintConfig(p.options))) != len(node.Spec.Taints) {
+					incompatibleEverywhere = false
+					break
+				}
+			}
+			if !hardMismatch(failure) {
+				incompatibleEverywhere = false
+				break
+			}
+		}
+		if incompatibleEverywhere {
+			item.Placement = api.PlacementResult_PLACEMENT_INCOMPATIBLE
+		}
+		allIncompatible = allIncompatible && incompatibleEverywhere
+		response.Pods = append(response.Pods, item)
+	}
+	if allIncompatible {
+		response.Placement = api.PlacementResult_PLACEMENT_INCOMPATIBLE
+	}
+	return response, nil
+}
+
+func hardMismatch(failure clustersnapshot.SchedulingError) bool {
+	if failure == nil || failure.Type() != clustersnapshot.FailingPredicateError {
+		return false
+	}
+	switch failure.FailingPredicateName() {
+	case "NodeAffinity", "NodeName", "TaintToleration", "VolumeZone":
+		return true
+	case "VolumeBinding":
+		return slices.Contains(failure.FailingPredicateReasons(), string(volumebinding.ErrReasonNodeConflict))
+	default:
+		return false
+	}
+}
+
+func (p *Planner) PlanDrain(ctx context.Context, request *api.DrainRequest) (*api.DrainResponse, error) {
+	done, err := p.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	if request.DeadlineUnixMillis <= 0 {
+		return nil, status.Error(codes.InvalidArgument, "an absolute node-loss deadline is required")
+	}
+	state, err := p.state(request.Sources)
+	if err != nil {
+		return nil, err
+	}
+	cutoff := time.UnixMilli(request.DeadlineUnixMillis).Add(-state.grace - 5*time.Second)
+	response := &api.DrainResponse{SnapshotId: state.id, LatestDrainStartUnixMillis: cutoff.UnixMilli(), DeadlineReached: !time.Now().Before(cutoff)}
+	// This gate uses only real, Ready destinations. Upcoming capacity cannot
+	// authorize eviction, even if it covered the earlier replacement estimate.
+	if _, _, err := unscheduled(state.snapshot, state.pending, scheduling.ScheduleAnywhere); err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	remaining, _, err := unscheduled(state.snapshot, state.moving, scheduling.ScheduleAnywhere)
+	if err != nil {
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	if len(remaining) > 0 && !response.DeadlineReached {
+		response.WaitForCapacity = true
+		response.Reasons = append(response.Reasons, "replacement room is not yet Ready and schedulable")
+		return response, nil
+	}
+	for _, pod := range state.moving {
+		allowed, _, _ := state.pdbs.CanRemovePods([]*corev1.Pod{pod})
+		if !allowed {
+			response.PdbBlocked = true
+			continue
+		}
+		state.pdbs.RemovePods([]*corev1.Pod{pod})
+		response.Evictions = append(response.Evictions, &api.PodReference{Namespace: pod.Namespace, Name: pod.Name, Uid: string(pod.UID), ResourceVersion: pod.ResourceVersion})
+	}
+	if response.PdbBlocked {
+		response.Reasons = append(response.Reasons, "PodDisruptionBudget currently blocks part of the drain")
+	}
+	return response, nil
+}

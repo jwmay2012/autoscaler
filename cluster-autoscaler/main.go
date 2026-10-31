@@ -53,6 +53,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/core"
 	coreoptions "k8s.io/autoscaler/cluster-autoscaler/core/options"
 	"k8s.io/autoscaler/cluster-autoscaler/core/podlistprocessor"
+	"k8s.io/autoscaler/cluster-autoscaler/externalpolicy"
 	"k8s.io/autoscaler/cluster-autoscaler/metrics"
 	"k8s.io/autoscaler/cluster-autoscaler/observers/loopstart"
 	ca_processors "k8s.io/autoscaler/cluster-autoscaler/processors"
@@ -243,6 +244,28 @@ func buildAutoscaler(ctx context.Context, debuggingSnapshotter debuggingsnapshot
 
 	}
 	opts.Processors.ScaleDownNodeProcessor = cp
+	var capacityPlanner *externalpolicy.Planner
+	var externalConfig externalpolicy.Config
+	if autoscalingOptions.ExternalPolicyConfig != "" {
+		externalConfig, err = externalpolicy.ReadConfig(autoscalingOptions.ExternalPolicyConfig)
+		if err != nil {
+			return nil, nil, err
+		}
+		policyClient, err := externalpolicy.NewClient(externalConfig)
+		if err != nil {
+			return nil, nil, err
+		}
+		cp.Register(policyClient)
+		opts.Processors.DeletionAuthorizer = policyClient
+		if externalConfig.Planner.Listen != "" {
+			capacityPlanner, err = externalpolicy.NewPlanner(informerFactory, autoscalingOptions, externalConfig.ManagedNodeSelector)
+			if err != nil {
+				policyClient.CleanUp()
+				return nil, nil, err
+			}
+			opts.Processors.PlanningObserver = capacityPlanner
+		}
+	}
 
 	var nodeInfoComparator nodegroupset.NodeInfoComparator
 	if len(autoscalingOptions.BalancingLabels) > 0 {
@@ -296,6 +319,11 @@ func buildAutoscaler(ctx context.Context, debuggingSnapshotter debuggingsnapshot
 	}
 
 	podObserver := loop.StartPodObserver(ctx, kube_util.CreateKubeClient(autoscalingOptions.KubeClientOpts))
+	if capacityPlanner != nil {
+		if err := capacityPlanner.Start(ctx, externalConfig.Planner); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	// A ProvisioningRequestPodsInjector is used as provisioningRequestProcessingTimesGetter here to obtain the last time a
 	// ProvisioningRequest was processed. This is because the ProvisioningRequestPodsInjector in addition to injecting pods

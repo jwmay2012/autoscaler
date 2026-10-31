@@ -32,6 +32,7 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/core/utils"
 	"k8s.io/autoscaler/cluster-autoscaler/metrics"
 	"k8s.io/autoscaler/cluster-autoscaler/observers/nodegroupchange"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/deletion"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/clustersnapshot/predicate"
@@ -67,6 +68,7 @@ type Actuator struct {
 	// as well as Cluster Autoscaler implementations that may override ScaleDownSetProcessor
 	budgetProcessor           *budgets.ScaleDownBudgetProcessor
 	configGetter              actuatorNodeGroupConfigGetter
+	authorizers               []deletion.Authorizer
 	nodeDeleteDelayAfterTaint time.Duration
 	pastLatencies             *expiring.List
 }
@@ -79,7 +81,7 @@ type actuatorNodeGroupConfigGetter interface {
 }
 
 // NewActuator returns a new instance of Actuator.
-func NewActuator(autoscalingCtx *ca_context.AutoscalingContext, scaleStateNotifier nodegroupchange.NodeGroupChangeObserver, ndt *deletiontracker.NodeDeletionTracker, deleteOptions options.NodeDeleteOptions, drainabilityRules rules.Rules, configGetter actuatorNodeGroupConfigGetter) *Actuator {
+func NewActuator(autoscalingCtx *ca_context.AutoscalingContext, scaleStateNotifier nodegroupchange.NodeGroupChangeObserver, ndt *deletiontracker.NodeDeletionTracker, deleteOptions options.NodeDeleteOptions, drainabilityRules rules.Rules, configGetter actuatorNodeGroupConfigGetter, authorizers ...deletion.Authorizer) *Actuator {
 	ndb := NewNodeDeletionBatcher(autoscalingCtx, scaleStateNotifier, ndt, autoscalingCtx.NodeDeletionBatcherInterval)
 	legacyFlagDrainConfig := SingleRuleDrainConfig(autoscalingCtx.MaxGracefulTerminationSec)
 	var evictor Evictor
@@ -96,6 +98,7 @@ func NewActuator(autoscalingCtx *ca_context.AutoscalingContext, scaleStateNotifi
 		deleteOptions:             deleteOptions,
 		drainabilityRules:         drainabilityRules,
 		configGetter:              configGetter,
+		authorizers:               authorizers,
 		nodeDeleteDelayAfterTaint: autoscalingCtx.NodeDeleteDelayAfterTaint,
 		pastLatencies:             expiring.NewList(),
 	}
@@ -139,6 +142,28 @@ func (a *Actuator) startDeletion(empty, drain []*apiv1.Node, force bool) (status
 	emptyToDelete, drainToDelete := a.budgetProcessor.CropNodes(a.nodeDeletionTracker, empty, drain)
 	if len(emptyToDelete) == 0 && len(drainToDelete) == 0 {
 		return status.ScaleDownNoNodeDeleted, nil, nil
+	}
+	for _, authorizer := range a.authorizers {
+		if authorizer == nil {
+			continue
+		}
+		batches := []deletion.Batch{}
+		for _, class := range []struct {
+			views []*budgets.NodeGroupView
+			empty bool
+		}{{emptyToDelete, true}, {drainToDelete, false}} {
+			for _, view := range class.views {
+				groupOptions, err := view.Group.GetOptions(a.ctx.NodeGroupDefaults)
+				if err != nil && err != cloudprovider.ErrNotImplemented {
+					return status.ScaleDownNoNodeDeleted, nil, nil
+				}
+				batches = append(batches, deletion.Batch{NodeGroupID: view.Group.Id(), Nodes: view.Nodes, Empty: class.empty, Atomic: groupOptions != nil && groupOptions.ZeroOrMaxNodeScaling})
+			}
+		}
+		if allowed, reason := authorizer.AuthorizeDeletion(a.ctx, batches, force); !allowed {
+			klog.V(1).Infof("Scale down deferred by external authorization: %s", reason)
+			return status.ScaleDownNoNodeDeleted, nil, nil
+		}
 	}
 
 	if len(emptyToDelete) > 0 {
