@@ -167,6 +167,27 @@ func TestConcurrentNoticesUseOneCombinedPlan(t *testing.T) {
 	}
 }
 
+func TestReplacementCannotBorrowAnotherEnvelope(t *testing.T) {
+	source := plannerNode("source")
+	planner, _ := plannerFixture(t, []*corev1.Node{source}, []*corev1.Pod{plannerPod("work", source.Name)})
+	publishGroups(t, planner, map[string]*corev1.Node{"preferred": plannerNode("preferred-template"), "fallback": plannerNode("fallback-template")}, nil, nil)
+	request := replacementRequest(source)
+	request.Budgets = []*api.ExpansionBudget{{NodeGroupIds: []string{"preferred"}, MaximumAdditionalNodes: 0}, {NodeGroupIds: []string{"fallback"}, MaximumAdditionalNodes: 1}}
+	result, err := planner.PlanReplacement(context.Background(), request)
+	if err != nil || !result.Covered || len(result.Additions) != 1 || result.Additions[0].NodeGroupId != "fallback" {
+		t.Fatalf("borrowed another envelope's capacity: %+v %v", result, err)
+	}
+	request.Budgets[0].NodeGroupIds = append(request.Budgets[0].NodeGroupIds, "fallback")
+	if _, err := planner.PlanReplacement(context.Background(), request); err == nil {
+		t.Fatal("duplicated envelope membership accepted")
+	}
+	request.Budgets = request.Budgets[:1]
+	request.Budgets[0].NodeGroupIds = []string{"preferred"}
+	if _, err := planner.PlanReplacement(context.Background(), request); err == nil {
+		t.Fatal("missing envelope membership accepted")
+	}
+}
+
 func TestRelocationPreservesCompatiblePDBWorkAndUnknownTransientState(t *testing.T) {
 	for _, mode := range []string{"mixed", "transient", "not-safe-to-evict"} {
 		t.Run(mode, func(t *testing.T) {
