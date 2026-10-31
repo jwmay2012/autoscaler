@@ -377,6 +377,26 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 	if len(request.AllowedNodeGroupIds) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "explicit permitted node groups are required")
 	}
+	budgetFor, budgetLeft := map[string]int{}, map[int]int{}
+	for i, budget := range request.Budgets {
+		if budget == nil || budget.MaximumAdditionalNodes < 0 {
+			return nil, status.Error(codes.InvalidArgument, "invalid shared expansion budget")
+		}
+		budgetLeft[i] = int(budget.MaximumAdditionalNodes)
+		for _, id := range budget.NodeGroupIds {
+			if _, duplicate := budgetFor[id]; duplicate || !slices.Contains(request.AllowedNodeGroupIds, id) {
+				return nil, status.Error(codes.InvalidArgument, "shared budgets must partition the permitted node groups")
+			}
+			budgetFor[id] = i
+		}
+	}
+	if len(request.Budgets) > 0 {
+		for _, id := range request.AllowedNodeGroupIds {
+			if _, exists := budgetFor[id]; !exists {
+				return nil, status.Error(codes.InvalidArgument, "permitted node group has no shared budget")
+			}
+		}
+	}
 	state, err := p.state(request.Sources)
 	if err != nil {
 		return nil, err
@@ -454,6 +474,9 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 				continue
 			}
 			limit := min(left, group.maximum-group.target)
+			if budget, exists := budgetFor[id]; exists {
+				limit = min(limit, budgetLeft[budget])
+			}
 			for key, delta := range group.delta {
 				if available, limited := resources[key]; limited && delta > 0 {
 					if available == resource.LimitUnknown {
@@ -512,11 +535,17 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 		if group == nil || selected.NodeCount > group.maximum-group.target {
 			return nil, status.Error(codes.FailedPrecondition, "expander returned an invalid option")
 		}
+		if budget, exists := budgetFor[group.id]; exists && selected.NodeCount > budgetLeft[budget] {
+			return nil, status.Error(codes.FailedPrecondition, "expander exceeded a shared budget")
+		}
 		if err := addVirtualNodes(state.snapshot, group, selected.NodeCount, fmt.Sprintf("replacement-%d", len(response.Additions))); err != nil {
 			return nil, status.Error(codes.Unavailable, err.Error())
 		}
 		response.Additions = append(response.Additions, &api.GroupAddition{NodeGroupId: group.id, Count: int32(selected.NodeCount)})
 		group.target += selected.NodeCount
+		if budget, exists := budgetFor[group.id]; exists {
+			budgetLeft[budget] -= selected.NodeCount
+		}
 		chargeResources(resources, group.delta, selected.NodeCount)
 		left -= selected.NodeCount
 	}

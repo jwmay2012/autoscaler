@@ -98,6 +98,14 @@ message ReplacementRequest {
   // Accepted requests not yet reflected in the planner's provider snapshot.
   // Counts are target sizes, so they are merged with observed targets, not added.
   map<string, int32> pending_target_sizes = 5;
+  // Optional disjoint shared envelopes. When supplied, every permitted group
+  // belongs to exactly one envelope. Grants are charged once to that envelope.
+  repeated ExpansionBudget budgets = 6;
+}
+
+message ExpansionBudget {
+  repeated string node_group_ids = 1;
+  int32 maximum_additional_nodes = 2;
 }
 
 message ReplacementResponse {
