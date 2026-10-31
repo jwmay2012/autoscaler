@@ -155,7 +155,7 @@ func TestRelocationTreatsVolumeZoneConflictAsIncompatible(t *testing.T) {
 				{"both zones", []*corev1.Node{otherZone, sameZone}, api.PlacementResult_PLACEMENT_FEASIBLE, string(sameZone.UID)},
 			} {
 				t.Run(test.name, func(t *testing.T) {
-					request := &api.RelocationRequest{Source: identity(source, "source")}
+					request := &api.RelocationRequest{Sources: []*api.NodeIdentity{identity(source, "source")}}
 					for _, node := range test.destinations {
 						request.Destinations = append(request.Destinations, identity(node, "target"))
 					}
@@ -230,7 +230,7 @@ func TestPlanningIsRepeatableForUnchangedState(t *testing.T) {
 	source := identity(nodes[0], "source")
 	deadline := time.Now().Add(2 * time.Minute).UnixMilli()
 	replacement := &api.ReplacementRequest{Sources: []*api.NodeIdentity{source}, DeadlineUnixMillis: deadline, MaximumAdditionalNodes: 4, AllowedNodeGroupIds: []string{"preferred", "fallback"}}
-	relocation := &api.RelocationRequest{Source: source, Destinations: []*api.NodeIdentity{identity(nodes[2], "target"), identity(nodes[1], "target")}}
+	relocation := &api.RelocationRequest{Sources: []*api.NodeIdentity{source}, Destinations: []*api.NodeIdentity{identity(nodes[2], "target"), identity(nodes[1], "target")}}
 	drain := &api.DrainRequest{Sources: []*api.NodeIdentity{source}, DeadlineUnixMillis: deadline}
 
 	var baseline string

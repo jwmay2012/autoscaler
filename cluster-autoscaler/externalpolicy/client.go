@@ -29,13 +29,17 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	ca "k8s.io/autoscaler/cluster-autoscaler/context"
 	api "k8s.io/autoscaler/cluster-autoscaler/externalpolicy/protos"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/deletion"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/drainability/rules"
+	"k8s.io/autoscaler/cluster-autoscaler/simulator/framework"
 	"k8s.io/autoscaler/cluster-autoscaler/simulator/options"
+	"k8s.io/autoscaler/cluster-autoscaler/utils/drain"
 	caerrors "k8s.io/autoscaler/cluster-autoscaler/utils/errors"
 	"k8s.io/klog/v2"
 )
@@ -127,6 +131,13 @@ func (c *Client) GetScaleDownCandidates(state *ca.AutoscalingContext, input []*c
 		}
 		candidate := &api.Candidate{Node: identity(node, group.Id())}
 		if info, err := state.ClusterSnapshot.GetNodeInfo(node.Name); err == nil {
+			protected := false
+			for _, pod := range info.Pods() {
+				protected = protected || c.protectedWork(pod.Pod)
+			}
+			if protected && c.config.Mode != "observe" {
+				continue
+			}
 			deleteOptions := options.NewNodeDeleteOptions(state.AutoscalingOptions)
 			pods, _, _, err := simulator.GetPodsToMove(info, deleteOptions, rules.Default(deleteOptions), state.ListerRegistry, state.RemainingPdbTracker, now)
 			candidate.Empty = err == nil && len(pods) == 0
@@ -174,6 +185,31 @@ func (c *Client) GetScaleDownCandidates(state *ca.AutoscalingContext, input []*c
 		}
 	}
 	return result, nil
+}
+
+func (c *Client) protectedWork(pod *corev1.Pod) bool {
+	if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed || pod.Annotations["cluster-autoscaler.kubernetes.io/safe-to-evict"] == "true" {
+		return false
+	}
+	owner := metav1.GetControllerOf(pod)
+	if owner == nil {
+		return false
+	}
+	key := owner.Kind
+	if group, _, found := strings.Cut(owner.APIVersion, "/"); found {
+		key = group + "/" + key
+	}
+	return slices.Contains(c.config.ProtectedControllers, key)
+}
+
+// Name and Drainable also install protection in native simulation and the
+// actual drain, where Pods may have arrived after the loop's initial snapshot.
+func (c *Client) Name() string { return "ProtectedController" }
+func (c *Client) Drainable(_ *drainability.DrainContext, pod *corev1.Pod, node *framework.NodeInfo) drainability.Status {
+	if c.config.Mode == "enforce" && c.managed(node.Node()) && c.protectedWork(pod) {
+		return drainability.NewBlockedStatus(drain.ProtectedController, fmt.Errorf("unfinished pod %s/%s belongs to a protected controller", pod.Namespace, pod.Name))
+	}
+	return drainability.NewUndefinedStatus()
 }
 
 func validateOrder(request *api.OrderCandidatesRequest, response *api.OrderCandidatesResponse, known map[string]*corev1.Node) ([]*corev1.Node, error) {

@@ -101,6 +101,10 @@ message ReplacementRequest {
   // Optional disjoint shared envelopes. When supplied, every permitted group
   // belongs to exactly one envelope. Grants are charged once to that envelope.
   repeated ExpansionBudget budgets = 6;
+  // Hypothetical ceilings for this read-only estimate. The caller must commit
+  // the resulting bounds and replicas together before treating a plan as an
+  // accepted request. Native health, resource limits and shared budgets apply.
+  map<string, int32> maximum_target_sizes = 7;
 }
 
 message ExpansionBudget {
@@ -120,7 +124,8 @@ message ReplacementResponse {
 }
 
 message RelocationRequest {
-  NodeIdentity source = 1;
+  // Sources are simulated jointly so they cannot each reserve the same room.
+  repeated NodeIdentity sources = 1;
   repeated NodeIdentity destinations = 2;
 }
 
@@ -148,6 +153,7 @@ message PodPlacement {
   PlacementResult placement = 2;
   bool pdb_blocked = 3;
   string destination_node_uid = 4;
+  string source_node_uid = 5;
 }
 
 message PodReference {
