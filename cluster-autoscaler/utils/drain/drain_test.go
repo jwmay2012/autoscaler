@@ -172,8 +172,12 @@ func TestBlockingPodReasonFormatting(t *testing.T) {
 			want: "UnexpectedError",
 		},
 		{
-			bpr:  BlockingPodReason(9),
-			want: "unrecognized reason: 9",
+			bpr:  ProtectedController,
+			want: "ProtectedController",
+		},
+		{
+			bpr:  BlockingPodReason(10),
+			want: "unrecognized reason: 10",
 		},
 	} {
 		t.Run(tc.want, func(t *testing.T) {
