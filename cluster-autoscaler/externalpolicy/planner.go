@@ -199,7 +199,7 @@ func (p *Planner) begin(ctx context.Context) (func(), error) {
 	return func() { <-p.gate }, nil
 }
 
-func (p *Planner) state(sources []*api.NodeIdentity) (*planningState, error) {
+func (p *Planner) state(sources, destinations []*api.NodeIdentity, restrictDestinations bool) (*planningState, error) {
 	if len(sources) == 0 || len(sources) > 100 {
 		return nil, status.Error(codes.InvalidArgument, "one to one hundred source identities are required")
 	}
@@ -250,9 +250,19 @@ func (p *Planner) state(sources []*api.NodeIdentity) (*planningState, error) {
 		result.sources = append(result.sources, identity(node, source.NodeGroupId))
 	}
 	virtualNodes := make([]*corev1.Node, 0, len(nodes))
+	allowed := map[string]bool{}
+	for _, destination := range destinations {
+		if err := matchingNode(destination, result.nodes); err != nil {
+			return nil, err
+		}
+		if lost[destination.Name] || allowed[destination.Name] {
+			return nil, status.Error(codes.InvalidArgument, "destinations must be unique and separate from sources")
+		}
+		allowed[destination.Name] = true
+	}
 	for _, node := range nodes {
 		copy := node.DeepCopy()
-		if lost[node.Name] || !p.available(node) {
+		if lost[node.Name] || !p.available(node) || (restrictDestinations && !allowed[node.Name]) {
 			result.unavailable[node.Name] = true
 			copy.Spec.Unschedulable = true
 		}
@@ -377,8 +387,17 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 	if request.MaximumAdditionalNodes < 0 || request.MaximumAdditionalNodes > 1000 {
 		return nil, status.Error(codes.InvalidArgument, "invalid additional-node bound")
 	}
-	if request.DeadlineUnixMillis <= 0 {
+	if request.PlannedMaintenance && request.DeadlineUnixMillis != 0 {
+		return nil, status.Error(codes.InvalidArgument, "planned maintenance must not have a loss deadline")
+	}
+	if !request.PlannedMaintenance && request.DeadlineUnixMillis <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "an absolute node-loss deadline is required")
+	}
+	if !request.PlannedMaintenance && len(request.Destinations) != 0 {
+		return nil, status.Error(codes.InvalidArgument, "destination restrictions require planned maintenance")
+	}
+	if request.MinimumDestinationNodes < 0 || request.MinimumDestinationNodes > 1000 || (!request.PlannedMaintenance && request.MinimumDestinationNodes != 0) {
+		return nil, status.Error(codes.InvalidArgument, "a bounded destination minimum requires planned maintenance")
 	}
 	if len(request.AllowedNodeGroupIds) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "explicit permitted node groups are required")
@@ -403,7 +422,7 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 			}
 		}
 	}
-	state, err := p.state(request.Sources)
+	state, err := p.state(request.Sources, request.Destinations, request.PlannedMaintenance)
 	if err != nil {
 		return nil, err
 	}
@@ -416,11 +435,24 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 	if view.limitsError != "" {
 		return nil, status.Error(codes.Unavailable, "native cluster resource limits unavailable: "+view.limitsError)
 	}
-	response := &api.ReplacementResponse{SnapshotId: state.id, ObservedAtUnixMillis: time.Now().UnixMilli(), Sources: state.sources,
-		LatestDrainStartUnixMillis: time.UnixMilli(request.DeadlineUnixMillis).Add(-state.grace - 5*time.Second).UnixMilli()}
+	response := &api.ReplacementResponse{SnapshotId: state.id, ObservedAtUnixMillis: time.Now().UnixMilli(), Sources: state.sources}
+	if !request.PlannedMaintenance {
+		response.LatestDrainStartUnixMillis = time.UnixMilli(request.DeadlineUnixMillis).Add(-state.grace - 5*time.Second).UnixMilli()
+	} else if reasons, _, _, err := p.maintenanceRestrictions(ctx, state); err != nil {
+		return nil, err
+	} else if len(reasons) > 0 {
+		response.Reasons, response.UncoveredPods = reasons, int32(len(state.moving))
+		return response, nil
+	}
 	groups := map[string]*planningGroup{}
 	resources := maps.Clone(view.resources)
 	committed := len(state.nodes)
+	destinationCount := 0
+	for _, destination := range request.Destinations {
+		if p.available(state.nodes[destination.Name]) {
+			destinationCount++
+		}
+	}
 	for id, original := range view.groups {
 		copy := *original
 		if ceiling, exists := request.MaximumTargetSizes[id]; exists {
@@ -439,7 +471,8 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 				incoming--
 			}
 		}
-		if original.safe {
+		if original.safe && (!request.PlannedMaintenance || slices.Contains(request.AllowedNodeGroupIds, id)) {
+			destinationCount += max(0, incoming)
 			if err := addVirtualNodes(state.snapshot, &copy, max(0, incoming), "incoming"); err != nil {
 				return nil, status.Error(codes.Unavailable, err.Error())
 			}
@@ -456,8 +489,9 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 	if p.options.MaxNodesTotal > 0 {
 		left = min(left, max(0, p.options.MaxNodesTotal-committed))
 	}
-	previous := len(remaining) + 1
-	for len(remaining) > 0 {
+	minimum := int(request.MinimumDestinationNodes)
+	previous := len(remaining) + max(0, minimum-destinationCount) + 1
+	for len(remaining) > 0 || destinationCount < minimum {
 		if err := ctx.Err(); err != nil {
 			return nil, status.FromContextError(err).Err()
 		}
@@ -465,14 +499,15 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 		if err != nil {
 			return nil, status.Error(codes.Unavailable, err.Error())
 		}
-		if len(remaining) == 0 || left == 0 {
+		progress := len(remaining) + max(0, minimum-destinationCount)
+		if progress == 0 || left == 0 {
 			break
 		}
-		if len(remaining) >= previous {
+		if progress >= previous {
 			response.Reasons = append(response.Reasons, "native estimate made no scheduling progress; further expansion deferred")
 			break
 		}
-		previous = len(remaining)
+		previous = progress
 		options := []expander.Option{}
 		templates := map[string]*framework.NodeInfo{}
 		ids := append([]string(nil), request.AllowedNodeGroupIds...)
@@ -499,6 +534,15 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 				}
 			}
 			if limit <= 0 || (group.options.ZeroOrMaxNodeScaling && limit < group.maximum-group.target) {
+				continue
+			}
+			if len(remaining) == 0 && destinationCount < minimum {
+				count := min(limit, minimum-destinationCount)
+				if group.options.ZeroOrMaxNodeScaling {
+					count = group.maximum - group.target
+				}
+				options = append(options, expander.Option{NodeGroup: group, NodeCount: count})
+				templates[id] = group.template
 				continue
 			}
 			limiter := estimator.NewThresholdBasedEstimationLimiter([]estimator.Threshold{estimator.NewStaticThreshold(limit, time.Second)})
@@ -555,13 +599,14 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 		}
 		response.Additions = append(response.Additions, &api.GroupAddition{NodeGroupId: group.id, Count: int32(selected.NodeCount)})
 		group.target += selected.NodeCount
+		destinationCount += selected.NodeCount
 		if budget, exists := budgetFor[group.id]; exists {
 			budgetLeft[budget] -= selected.NodeCount
 		}
 		chargeResources(resources, group.delta, selected.NodeCount)
 		left -= selected.NodeCount
 	}
-	response.Covered, response.UncoveredPods = len(remaining) == 0, int32(len(remaining))
+	response.Covered, response.UncoveredPods = len(remaining) == 0 && destinationCount >= minimum, int32(len(remaining))
 	if !response.Covered && left == 0 {
 		response.Reasons = append(response.Reasons, "additional-node allowance or native cluster node limit reached")
 	}

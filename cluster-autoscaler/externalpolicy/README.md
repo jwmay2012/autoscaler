@@ -64,3 +64,21 @@ and has no provider or Kubernetes write side effects.
 
 The protocol is experimental. Generic APIs and focused commits are kept
 separate from downstream deployment configuration to support upstream review.
+
+Planned maintenance is distinct from impending loss. Replacement and drain
+requests set `planned_maintenance` with zero deadlines; an older server rejects
+that combination instead of silently applying deadline-based behavior. The
+caller supplies explicit existing destination identities and permitted expansion
+groups, validating the intended configuration separately for each offering.
+An empty destination list cannot credit other existing Nodes. Incoming capacity
+is credited only from permitted groups; `minimum_destination_nodes` preserves
+declared minimum capacity even when the retiring source has no workload.
+Native node/resource ceilings and shared budgets still apply.
+
+Maintenance performs voluntary-disruption checks before recommending additions
+and never bypasses capacity waiting. A positive per-node drain result can allow
+a sequential drain under a PDB; the returned eviction list spends only the
+currently available disruption budget. The caller must still use Kubernetes'
+Eviction API, or another controller that does so. Native protected-controller
+rules also apply. The planner neither installs lifecycle gates nor changes
+provider targets; the caller owns those operations and must revalidate them.

@@ -42,7 +42,7 @@ func (p *Planner) ExplainRelocation(ctx context.Context, request *api.Relocation
 		return nil, err
 	}
 	defer done()
-	state, err := p.state(request.Sources)
+	state, err := p.state(request.Sources, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -181,12 +181,21 @@ func (p *Planner) PlanDrain(ctx context.Context, request *api.DrainRequest) (*ap
 		return nil, err
 	}
 	defer done()
-	if request.DeadlineUnixMillis <= 0 {
+	if request.PlannedMaintenance && (request.DeadlineUnixMillis != 0 || len(request.SourceDeadlinesUnixMillis) != 0) {
+		return nil, status.Error(codes.InvalidArgument, "planned maintenance must not have loss deadlines")
+	}
+	if !request.PlannedMaintenance && request.DeadlineUnixMillis <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "an absolute node-loss deadline is required")
 	}
-	state, err := p.state(request.Sources)
+	if !request.PlannedMaintenance && len(request.Destinations) != 0 {
+		return nil, status.Error(codes.InvalidArgument, "destination restrictions require planned maintenance")
+	}
+	state, err := p.state(request.Sources, request.Destinations, request.PlannedMaintenance)
 	if err != nil {
 		return nil, err
+	}
+	if request.PlannedMaintenance {
+		return p.maintenanceDrain(ctx, state)
 	}
 	response := &api.DrainResponse{SnapshotId: state.id}
 	decisions := map[string]*api.NodeDrainStatus{}
