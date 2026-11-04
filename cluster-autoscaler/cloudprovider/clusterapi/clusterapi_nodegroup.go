@@ -233,7 +233,8 @@ func (ng *nodegroup) Id() string {
 
 // Debug returns a string containing all information regarding this node group.
 func (ng *nodegroup) Debug() string {
-	replicas, err := ng.scalableResource.Replicas()
+	// Logging must not make live API reads, even when its log level is disabled.
+	replicas, err := ng.TargetSize()
 	if err != nil {
 		return fmt.Sprintf("%s (min: %d, max: %d, replicas: %v)", ng.Id(), ng.MinSize(), ng.MaxSize(), err)
 	}

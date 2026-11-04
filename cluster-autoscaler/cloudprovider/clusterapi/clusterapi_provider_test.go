@@ -145,12 +145,18 @@ func TestInfrastructureDiscoveryIsSharedUntilProviderRefresh(t *testing.T) {
 	}
 	provider := newProvider(cloudprovider.ClusterAPIProviderName, &cloudprovider.ResourceLimiter{}, controller.machineController)
 	controller.discoveryClient.ClearActions()
+	controller.dynamicClientset.ClearActions()
 	if err := provider.Refresh(); err != nil {
 		t.Fatal(err)
 	}
 	for range 10 {
 		if groups := provider.NodeGroups(); len(groups) != 20 {
 			t.Fatalf("expected 20 zero-sized groups, got %d", len(groups))
+		}
+	}
+	for _, action := range controller.dynamicClientset.Actions() {
+		if action.GetVerb() == "get" && action.GetResource().Resource == "machinedeployments" {
+			t.Fatal("read-only node group enumeration fetched live scale data")
 		}
 	}
 	groupCalls := func() int {
