@@ -116,6 +116,11 @@ func (*provider) Cleanup() error {
 }
 
 func (p *provider) Refresh() error {
+	// Refresh API preferences with the next native loop while retaining the
+	// shared infrastructure informers and their current resource observations.
+	if cached, ok := p.controller.managementDiscoveryClient.(discovery.CachedDiscoveryInterface); ok {
+		cached.Invalidate()
+	}
 	return nil
 }
 
