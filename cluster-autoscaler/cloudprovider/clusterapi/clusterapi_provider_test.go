@@ -133,3 +133,62 @@ func BenchmarkNodeGroups(b *testing.B) {
 		}
 	})
 }
+
+func TestInfrastructureDiscoveryIsSharedUntilProviderRefresh(t *testing.T) {
+	controller := NewTestMachineController(t)
+	defer controller.Stop()
+	configs := NewTestConfigBuilder().ForMachineDeployment().WithNodeCount(0).
+		WithAnnotations(map[string]string{nodeGroupMinSizeAnnotationKey: "0", nodeGroupMaxSizeAnnotationKey: "4"}).
+		WithCapacity(map[string]string{"cpu": "2", "memory": "8Gi"}).BuildMultiple(20)
+	if err := controller.AddTestConfigs(configs...); err != nil {
+		t.Fatal(err)
+	}
+	provider := newProvider(cloudprovider.ClusterAPIProviderName, &cloudprovider.ResourceLimiter{}, controller.machineController)
+	controller.discoveryClient.ClearActions()
+	if err := provider.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	for range 10 {
+		if groups := provider.NodeGroups(); len(groups) != 20 {
+			t.Fatalf("expected 20 zero-sized groups, got %d", len(groups))
+		}
+	}
+	groupCalls := func() int {
+		count := 0
+		for _, action := range controller.discoveryClient.Actions() {
+			if action.GetVerb() == "get" && action.GetResource().Resource == "group" {
+				count++
+			}
+		}
+		return count
+	}
+	if calls := groupCalls(); calls != 1 {
+		t.Fatalf("repeated capacity lookups performed %d discovery calls, want 1", calls)
+	}
+	const group = "infrastructure.cluster.x-k8s.io"
+	controller.discoveryClient.Resources = append([]*v1.APIResourceList{{GroupVersion: group + "/v1beta2", APIResources: []v1.APIResource{{Name: "machinetemplates"}}}}, controller.discoveryClient.Resources...)
+	if version, err := getAPIGroupPreferredVersion(controller.managementDiscoveryClient, group); err != nil || version != "v1beta1" {
+		t.Fatalf("discovery changed within a refresh: %q %v", version, err)
+	}
+	if err := provider.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if version, err := getAPIGroupPreferredVersion(controller.managementDiscoveryClient, group); err != nil || version != "v1beta2" {
+		t.Fatalf("refresh did not observe the new API preference: %q %v", version, err)
+	}
+	if calls := groupCalls(); calls != 2 {
+		t.Fatalf("expected one discovery per refresh, got %d", calls)
+	}
+	resources := controller.discoveryClient.Resources
+	controller.discoveryClient.Resources = nil
+	if err := provider.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := getAPIGroupPreferredVersion(controller.managementDiscoveryClient, group); err == nil {
+		t.Fatal("empty discovery was accepted")
+	}
+	controller.discoveryClient.Resources = resources
+	if version, err := getAPIGroupPreferredVersion(controller.managementDiscoveryClient, group); err != nil || version != "v1beta2" {
+		t.Fatalf("empty discovery was cached instead of retried: %q %v", version, err)
+	}
+}
