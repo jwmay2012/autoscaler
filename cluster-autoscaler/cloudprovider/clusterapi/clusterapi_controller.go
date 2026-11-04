@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
+	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
@@ -551,6 +552,8 @@ func newMachineController(
 		return nil, fmt.Errorf("cannot add node indexer: %v", err)
 	}
 
+	// Cache only runtime infrastructure API discovery within a provider refresh;
+	// startup capability checks above retain their direct discovery reads.
 	return &machineController{
 		autoDiscoverySpecs:          autoDiscoverySpecs,
 		workloadInformerFactory:     workloadInformerFactory,
@@ -562,7 +565,7 @@ func newMachineController(
 		nodeInformer:                nodeInformer,
 		managementClient:            managementClient,
 		managementScaleClient:       managementScaleClient,
-		managementDiscoveryClient:   managementDiscoveryClient,
+		managementDiscoveryClient:   memory.NewMemCacheClient(managementDiscoveryClient),
 		machineSetResource:          gvrMachineSet,
 		machinePoolResource:         gvrMachinePool,
 		machinePoolsAvailable:       machinePoolsAvailable,
@@ -600,6 +603,9 @@ func getAPIGroupPreferredVersion(client discovery.DiscoveryInterface, APIGroup s
 	groupList, err := client.ServerGroups()
 	if err != nil {
 		return "", fmt.Errorf("failed to get ServerGroups: %v", err)
+	}
+	if groupList == nil {
+		return "", fmt.Errorf("discovery returned no API groups")
 	}
 
 	for _, group := range groupList.Groups {

@@ -128,6 +128,8 @@ type AutoscalingOptions struct {
 	GRPCExpanderCert string
 	// GRPCExpanderURL is the url of the gRPC server when using the gRPC expander
 	GRPCExpanderURL string
+	// ExternalPolicyConfig is an optional versioned policy/planner configuration.
+	ExternalPolicyConfig string
 	// IgnoreMirrorPodsUtilization is whether CA will ignore Mirror pods when calculating resource utilization for scaling down
 	IgnoreMirrorPodsUtilization bool
 	// MaxGracefulTerminationSec is maximum number of seconds scale down waits for pods to terminate before

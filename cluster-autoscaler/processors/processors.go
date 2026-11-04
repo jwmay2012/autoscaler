@@ -19,9 +19,11 @@ package processors
 import (
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	"k8s.io/autoscaler/cluster-autoscaler/observers/nodegroupchange"
+	"k8s.io/autoscaler/cluster-autoscaler/observers/planning"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/actionablecluster"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/binpacking"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/customresources"
+	"k8s.io/autoscaler/cluster-autoscaler/processors/deletion"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroupconfig"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroups"
 	"k8s.io/autoscaler/cluster-autoscaler/processors/nodegroups/asyncnodegroups"
@@ -36,6 +38,8 @@ import (
 // AutoscalingProcessors are a set of customizable processors used for encapsulating
 // various heuristics used in different parts of Cluster Autoscaler code.
 type AutoscalingProcessors struct {
+	// PlanningObserver optionally publishes immutable provider data to a planner.
+	PlanningObserver planning.Observer
 	// PodListProcessor is used to process list of unschedulable pods before autoscaling.
 	PodListProcessor pods.PodListProcessor
 	// NodeGroupListProcessor is used to process list of NodeGroups that can be used in scale-up.
@@ -50,6 +54,8 @@ type AutoscalingProcessors struct {
 	ScaleDownNodeProcessor nodes.ScaleDownNodeProcessor
 	// ScaleDownSetProcessor is used to make final selection of nodes to scale-down.
 	ScaleDownSetProcessor nodes.ScaleDownSetProcessor
+	// DeletionAuthorizer optionally guards the final post-budget removal batch.
+	DeletionAuthorizer deletion.Authorizer
 	// ScaleDownStatusProcessor is used to process the state of the cluster after a scale-down.
 	ScaleDownStatusProcessor status.ScaleDownStatusProcessor
 	// AutoscalingStatusProcessor is used to process the state of the cluster after each autoscaling iteration.

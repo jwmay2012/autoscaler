@@ -1,0 +1,217 @@
+/*
+Copyright 2026 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+syntax = "proto3";
+
+package autoscaling.policy.v1alpha1;
+option go_package = "k8s.io/autoscaler/cluster-autoscaler/externalpolicy/protos";
+
+// NodeIdentity is deliberately separate from a Pod's scheduling requirements.
+// A policy may select capacity without implementing scheduler predicates.
+message NodeIdentity {
+  string name = 1;
+  string uid = 2;
+  string provider_id = 3;
+  string node_group_id = 4;
+  string resource_version = 5;
+  string boot_id = 6;
+  map<string, string> labels = 7;
+  string system_uuid = 8;
+}
+
+message Candidate {
+  NodeIdentity node = 1;
+  bool empty = 2;
+}
+
+message OrderCandidatesRequest {
+  string snapshot_id = 1;
+  int64 observed_at_unix_millis = 2;
+  repeated Candidate candidates = 3;
+}
+
+message Exclusion {
+  string node_uid = 1;
+  string reason = 2;
+}
+
+message OrderCandidatesResponse {
+  string snapshot_id = 1;
+  string policy_revision = 2;
+  // Every requested candidate must occur exactly once in this list or exclusions.
+  repeated string ordered_node_uids = 3;
+  repeated Exclusion exclusions = 4;
+}
+
+message RemovalBatch {
+  string node_group_id = 1;
+  bool atomic = 2;
+  bool empty = 3;
+  repeated NodeIdentity nodes = 4;
+}
+
+message ApproveRemovalsRequest {
+  string snapshot_id = 1;
+  string policy_revision = 2;
+  int64 observed_at_unix_millis = 3;
+  // This is the actual batch AFTER native deletion budgets have been applied.
+  repeated RemovalBatch batches = 4;
+  bool force = 5;
+}
+
+message ApproveRemovalsResponse {
+  string snapshot_id = 1;
+  string policy_revision = 2;
+  // All-or-nothing approval avoids changing the validated batch after this call.
+  bool approved = 3;
+  string reason = 4;
+}
+
+service ScaleDownPolicy {
+  rpc OrderCandidates(OrderCandidatesRequest) returns (OrderCandidatesResponse);
+  rpc ApproveRemovals(ApproveRemovalsRequest) returns (ApproveRemovalsResponse);
+}
+
+message GroupAddition {
+  string node_group_id = 1;
+  int32 count = 2;
+}
+
+message ReplacementRequest {
+  // Batch ALL concurrent impending losses, not one independent request per node.
+  repeated NodeIdentity sources = 1;
+  int64 deadline_unix_millis = 2;
+  repeated string allowed_node_group_ids = 3;
+  int32 maximum_additional_nodes = 4;
+  // Accepted requests not yet reflected in the planner's provider snapshot.
+  // Counts are target sizes, so they are merged with observed targets, not added.
+  map<string, int32> pending_target_sizes = 5;
+  // Optional disjoint shared envelopes. When supplied, every permitted group
+  // belongs to exactly one envelope. Grants are charged once to that envelope.
+  repeated ExpansionBudget budgets = 6;
+  // Hypothetical ceilings for this read-only estimate. The caller must commit
+  // the resulting bounds and replicas together before treating a plan as an
+  // accepted request. Native health, resource limits and shared budgets apply.
+  map<string, int32> maximum_target_sizes = 7;
+  // Planned maintenance has no loss deadline and never permits early drain.
+  // A zero deadline also makes older servers reject this mode safely.
+  bool planned_maintenance = 8;
+  // In maintenance mode only these existing Nodes may receive displaced Pods.
+  // An empty list means no existing destination; expansion remains limited to
+  // allowed_node_group_ids. The caller validates each offering's desired spec.
+  repeated NodeIdentity destinations = 9;
+  // Maintenance can preserve a declared minimum even when the source is idle.
+  // Count eligible Ready and incoming destinations once before adding Nodes.
+  int32 minimum_destination_nodes = 10;
+}
+
+message ExpansionBudget {
+  repeated string node_group_ids = 1;
+  int32 maximum_additional_nodes = 2;
+}
+
+message ReplacementResponse {
+  string snapshot_id = 1;
+  int64 observed_at_unix_millis = 2;
+  repeated NodeIdentity sources = 3;
+  repeated GroupAddition additions = 4;
+  bool covered = 5;
+  int32 uncovered_pods = 6;
+  int64 latest_drain_start_unix_millis = 7;
+  repeated string reasons = 8;
+}
+
+message RelocationRequest {
+  // Sources are simulated jointly so they cannot each reserve the same room.
+  repeated NodeIdentity sources = 1;
+  repeated NodeIdentity destinations = 2;
+}
+
+enum PlacementResult {
+  PLACEMENT_UNKNOWN = 0;
+  PLACEMENT_FEASIBLE = 1;
+  PLACEMENT_INFEASIBLE = 2;
+  // A native predicate proves an incompatibility with the supplied targets.
+  PLACEMENT_INCOMPATIBLE = 3;
+}
+
+message RelocationResponse {
+  string snapshot_id = 1;
+  PlacementResult placement = 2;
+  bool pdb_blocked = 3;
+  bool other_disruption_blocked = 4;
+  repeated string reasons = 5;
+  repeated string used_node_uids = 6;
+  // Per-work results prevent one incompatible Pod from hiding compatible work.
+  repeated PodPlacement pods = 7;
+}
+
+message PodPlacement {
+  PodReference pod = 1;
+  PlacementResult placement = 2;
+  bool pdb_blocked = 3;
+  string destination_node_uid = 4;
+  string source_node_uid = 5;
+  bool other_disruption_blocked = 6;
+}
+
+message PodReference {
+  string namespace = 1;
+  string name = 2;
+  string uid = 3;
+  string resource_version = 4;
+}
+
+message DrainRequest {
+  // Same complete set of concurrent losses used by PlanReplacement.
+  repeated NodeIdentity sources = 1;
+  int64 deadline_unix_millis = 2;
+  // Per-source loss deadlines, keyed by Node UID. The common deadline is used
+  // for omitted entries. An earlier loss never authorizes another node's drain.
+  map<string, int64> source_deadlines_unix_millis = 3;
+  // Maintenance requires zero deadlines and always waits for usable capacity.
+  bool planned_maintenance = 4;
+  // Explicit, identity-bound existing destinations for maintenance only.
+  repeated NodeIdentity destinations = 5;
+}
+
+message NodeDrainStatus {
+  string node_uid = 1;
+  // In maintenance mode this is native whole-node drain eligibility. PDBs can
+  // serialize that drain; evictions contains only the currently allowed batch.
+  bool waiting = 2;
+  bool deadline_reached = 3;
+  int64 latest_drain_start_unix_millis = 4;
+}
+
+message DrainResponse {
+  string snapshot_id = 1;
+  bool wait_for_capacity = 2;
+  bool deadline_reached = 3;
+  bool pdb_blocked = 4;
+  int64 latest_drain_start_unix_millis = 5;
+  repeated PodReference evictions = 6;
+  repeated string reasons = 7;
+  repeated NodeDrainStatus nodes = 8;
+  bool other_disruption_blocked = 9;
+}
+
+// CapacityPlanner is read-only. It uses CA's scheduler framework and estimator;
+// it never binds Pods, changes node-group sizes, or bypasses an eviction budget.
+service CapacityPlanner {
+  rpc PlanReplacement(ReplacementRequest) returns (ReplacementResponse);
+  rpc ExplainRelocation(RelocationRequest) returns (RelocationResponse);
+  rpc PlanDrain(DrainRequest) returns (DrainResponse);
+}
