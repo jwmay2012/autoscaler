@@ -225,12 +225,17 @@ func (p *Planner) PlanDrain(ctx context.Context, request *api.DrainRequest) (*ap
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
+	response.ReplacementCapacityReady = len(remaining) == 0
+	if !response.ReplacementCapacityReady {
+		response.WaitForCapacity = true
+		response.Reasons = append(response.Reasons, "replacement room is not yet Ready and schedulable")
+		for _, decision := range decisions {
+			decision.Waiting = true
+		}
+		return response, nil
+	}
 	for _, pod := range state.moving {
 		decision := decisions[state.origins[string(pod.UID)]]
-		if len(remaining) > 0 && !decision.DeadlineReached {
-			decision.Waiting = true
-			continue
-		}
 		allowed, _, _ := state.pdbs.CanRemovePods([]*corev1.Pod{pod})
 		if !allowed {
 			response.PdbBlocked = true
@@ -239,15 +244,6 @@ func (p *Planner) PlanDrain(ctx context.Context, request *api.DrainRequest) (*ap
 		}
 		state.pdbs.RemovePods([]*corev1.Pod{pod})
 		response.Evictions = append(response.Evictions, &api.PodReference{Namespace: pod.Namespace, Name: pod.Name, Uid: string(pod.UID), ResourceVersion: pod.ResourceVersion})
-	}
-	for _, decision := range decisions {
-		response.WaitForCapacity = response.WaitForCapacity || (decision.Waiting && !decision.DeadlineReached)
-	}
-	if response.WaitForCapacity {
-		response.Reasons = append(response.Reasons, "replacement room is not yet Ready and schedulable")
-		// Other sources may have reached their own deadline. Their permitted
-		// evictions can proceed without draining the later-deadline sources.
-		response.WaitForCapacity = len(response.Evictions) == 0
 	}
 	if response.PdbBlocked {
 		response.Reasons = append(response.Reasons, "PodDisruptionBudget currently blocks part of the drain")
