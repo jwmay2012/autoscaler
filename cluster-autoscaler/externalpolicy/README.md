@@ -39,6 +39,12 @@ Relocation explanations distinguish disruption restrictions from scheduling
 feasibility. Ignoring PDBs for a diagnostic simulation never authorizes an
 eviction. Drain plans identify Pods and their original UIDs; actual eviction
 must use the Kubernetes Eviction API and its live PDB checks.
+Impending-loss drains always require real Ready, schedulable replacement room;
+the loss deadline is diagnostic and never overrides this requirement. The
+response explicitly confirms `replacement_capacity_ready` after accounting for
+pending and displaced Pods. Callers must require it before eviction, so an older
+planner cannot silently restore deadline-based eviction. Upcoming capacity does
+not qualify. Workload self-termination and host shutdown remain independent.
 Per-Pod results distinguish positively compatible work from hard incompatibility
 and unknown or currently full destinations. Multiple explanations are independent
 estimates, not additive reservations of destination space. Controller-less Pods
