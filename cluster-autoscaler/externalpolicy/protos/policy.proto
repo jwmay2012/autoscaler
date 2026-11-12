@@ -206,6 +206,11 @@ message DrainResponse {
   repeated string reasons = 7;
   repeated NodeDrainStatus nodes = 8;
   bool other_disruption_blocked = 9;
+  // For impending loss, confirms that all displaced work fits on real Ready,
+  // schedulable destinations after accounting for pending Pods. Deadlines and
+  // upcoming nodes never satisfy this gate. Clients must require this proof
+  // before eviction; its absence from an older server fails closed.
+  bool replacement_capacity_ready = 10;
 }
 
 // CapacityPlanner is read-only. It uses CA's scheduler framework and estimator;
