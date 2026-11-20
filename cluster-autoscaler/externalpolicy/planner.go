@@ -21,7 +21,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"maps"
-	"math"
 	"net"
 	"slices"
 	"sort"
@@ -529,11 +528,7 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 			}
 			for key, delta := range group.delta {
 				if available, limited := resources[key]; limited && delta > 0 {
-					if available == math.MaxInt64 {
-						limit = 0
-					} else {
-						limit = min(limit, int(max(0, available)/delta))
-					}
+					limit = min(limit, int(max(0, available)/delta))
 				}
 			}
 			if limit <= 0 || (group.options.ZeroOrMaxNodeScaling && limit < group.maximum-group.target) {
@@ -618,7 +613,7 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 
 func chargeResources(left map[string]int64, delta map[string]int64, nodes int) {
 	for key, perNode := range delta {
-		if remaining, exists := left[key]; exists && remaining != math.MaxInt64 {
+		if remaining, exists := left[key]; exists {
 			left[key] = max(0, remaining-int64(nodes)*perNode)
 		}
 	}

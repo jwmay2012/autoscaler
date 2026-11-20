@@ -18,6 +18,7 @@ package externalpolicy
 
 import (
 	"context"
+	"math"
 	"slices"
 	"testing"
 	"time"
@@ -93,6 +94,18 @@ func TestUnavailableNodesNeverSatisfyBlanketTolerantDisplacement(t *testing.T) {
 				t.Fatalf("unavailable room authorized drain: %+v %v", drain, err)
 			}
 		})
+	}
+}
+
+func TestReplacementAcceptsUnboundedNativeQuota(t *testing.T) {
+	source := plannerNode("source")
+	planner, _ := plannerFixture(t, []*corev1.Node{source}, []*corev1.Pod{plannerPod("work", source.Name)})
+	publishGroups(t, planner, map[string]*corev1.Node{"preferred": plannerNode("template")}, nil, nil)
+	planner.view.resources = map[string]int64{"cpu": math.MaxInt64}
+	planner.view.groups["preferred"].delta = map[string]int64{"cpu": 2}
+	result, err := planner.PlanReplacement(context.Background(), replacementRequest(source))
+	if err != nil || !result.Covered || len(result.Additions) != 1 || result.Additions[0].Count != 1 {
+		t.Fatalf("valid native quota treated as unknown: %+v, %v", result, err)
 	}
 }
 
