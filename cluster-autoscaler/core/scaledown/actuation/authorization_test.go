@@ -61,7 +61,7 @@ func TestAuthorizationRunsAfterBudgetBeforeAnySideEffect(t *testing.T) {
 				input = append(input, node)
 			}
 			registry := kubeutil.NewListerRegistry(nil, nil, kubeutil.NewTestPodLister(nil), kubeutil.NewTestPodDisruptionBudgetLister(nil), nil, nil, nil, nil, nil)
-			state, err := coretest.NewScaleTestAutoscalingContext(config.AutoscalingOptions{MaxScaleDownParallelism: 1, MaxDrainParallelism: 1}, client, registry, provider, nil, nil)
+			state, err := coretest.NewScaleTestAutoscalingContext(config.AutoscalingOptions{MaxScaleDownParallelism: 1, MaxDrainParallelism: 1}, client, registry, provider, nil, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

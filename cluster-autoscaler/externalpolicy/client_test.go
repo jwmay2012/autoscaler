@@ -57,7 +57,7 @@ func clientFixture(t *testing.T) (*Client, *ca.AutoscalingContext, []*corev1.Nod
 	provider := testprovider.NewTestCloudProviderBuilder().Build()
 	provider.AddNodeGroup("workers", 0, 10, 3)
 	registry := kubeutil.NewListerRegistry(nil, nil, kubeutil.NewTestPodLister(nil), kubeutil.NewTestPodDisruptionBudgetLister(nil), nil, nil, nil, nil, nil)
-	state, err := coretest.NewScaleTestAutoscalingContext(config.AutoscalingOptions{}, fake.NewSimpleClientset(), registry, provider, nil, nil)
+	state, err := coretest.NewScaleTestAutoscalingContext(config.AutoscalingOptions{}, fake.NewSimpleClientset(), registry, provider, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func clientFixture(t *testing.T) (*Client, *ca.AutoscalingContext, []*corev1.Nod
 		provider.AddNode("workers", node)
 		nodes = append(nodes, node)
 	}
-	if err := state.ClusterSnapshot.SetClusterState(nodes, nil, nil); err != nil {
+	if err := state.ClusterSnapshot.SetClusterState(nodes, nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	selector, _ := labels.Parse("example.com/managed=true")
@@ -186,7 +186,7 @@ func TestManagedWorkProtectionIsOptionalAndDoesNotAffectNoticePlanning(t *testin
 	pod.Spec.NodeName = nodes[0].Name
 	controller := true
 	pod.OwnerReferences = []metav1.OwnerReference{{APIVersion: "batch/v1", Kind: "Job", Name: "work", Controller: &controller}}
-	if err := state.ClusterSnapshot.SetClusterState(nodes, []*corev1.Pod{pod}, nil); err != nil {
+	if err := state.ClusterSnapshot.SetClusterState(nodes, []*corev1.Pod{pod}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	stub := client.rpc.(policyStub)

@@ -153,14 +153,14 @@ func (a *Actuator) startDeletion(empty, drain []*apiv1.Node, force bool) (status
 			empty bool
 		}{{emptyToDelete, true}, {drainToDelete, false}} {
 			for _, view := range class.views {
-				groupOptions, err := view.Group.GetOptions(a.ctx.NodeGroupDefaults)
+				groupOptions, err := view.Group.GetOptions(a.autoscalingCtx.NodeGroupDefaults)
 				if err != nil && err != cloudprovider.ErrNotImplemented {
 					return status.ScaleDownNoNodeDeleted, nil, nil
 				}
 				batches = append(batches, deletion.Batch{NodeGroupID: view.Group.Id(), Nodes: view.Nodes, Empty: class.empty, Atomic: groupOptions != nil && groupOptions.ZeroOrMaxNodeScaling})
 			}
 		}
-		if allowed, reason := authorizer.AuthorizeDeletion(a.ctx, batches, force); !allowed {
+		if allowed, reason := authorizer.AuthorizeDeletion(a.autoscalingCtx, batches, force); !allowed {
 			klog.V(1).Infof("Scale down deferred by external authorization: %s", reason)
 			return status.ScaleDownNoNodeDeleted, nil, nil
 		}

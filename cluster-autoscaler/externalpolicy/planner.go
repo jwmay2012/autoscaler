@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"slices"
 	"sort"
@@ -39,7 +40,6 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/config"
 	ca "k8s.io/autoscaler/cluster-autoscaler/context"
 	"k8s.io/autoscaler/cluster-autoscaler/core/scaledown/pdb"
-	"k8s.io/autoscaler/cluster-autoscaler/core/scaleup/resource"
 	"k8s.io/autoscaler/cluster-autoscaler/estimator"
 	"k8s.io/autoscaler/cluster-autoscaler/expander"
 	api "k8s.io/autoscaler/cluster-autoscaler/externalpolicy/protos"
@@ -104,7 +104,10 @@ func NewPlanner(factory informers.SharedInformerFactory, options config.Autoscal
 	if options.DynamicResourceAllocationEnabled {
 		return nil, fmt.Errorf("external planner does not yet support DRA snapshots")
 	}
-	handle, err := framework.NewHandle(factory, options.SchedulerConfig, false)
+	if options.CSINodeAwareSchedulingEnabled {
+		return nil, fmt.Errorf("external planner does not yet support CSINode snapshots")
+	}
+	handle, err := framework.NewHandle(factory, options.SchedulerConfig, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -314,8 +317,8 @@ func (p *Planner) state(sources, destinations []*api.NodeIdentity, restrictDesti
 		scheduled = append(scheduled, pod.DeepCopy())
 	}
 	result.id = fmt.Sprintf("%s-%x", snapshotID(nodes), hash.Sum(nil))
-	result.snapshot = &destinationSnapshot{ClusterSnapshot: predicate.NewPredicateSnapshot(store.NewBasicSnapshotStore(), p.framework, false), unavailable: result.unavailable}
-	if err := result.snapshot.SetClusterState(virtualNodes, scheduled, nil); err != nil {
+	result.snapshot = &destinationSnapshot{ClusterSnapshot: predicate.NewPredicateSnapshot(store.NewBasicSnapshotStore(), p.framework, false, max(1, p.options.PredicateParallelism), false), unavailable: result.unavailable}
+	if err := result.snapshot.SetClusterState(virtualNodes, scheduled, nil, nil); err != nil {
 		return nil, status.Error(codes.Unavailable, err.Error())
 	}
 	return result, nil
@@ -526,7 +529,7 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 			}
 			for key, delta := range group.delta {
 				if available, limited := resources[key]; limited && delta > 0 {
-					if available == resource.LimitUnknown {
+					if available == math.MaxInt64 {
 						limit = 0
 					} else {
 						limit = min(limit, int(max(0, available)/delta))
@@ -615,7 +618,7 @@ func (p *Planner) PlanReplacement(ctx context.Context, request *api.ReplacementR
 
 func chargeResources(left map[string]int64, delta map[string]int64, nodes int) {
 	for key, perNode := range delta {
-		if remaining, exists := left[key]; exists && remaining != resource.LimitUnknown {
+		if remaining, exists := left[key]; exists && remaining != math.MaxInt64 {
 			left[key] = max(0, remaining-int64(nodes)*perNode)
 		}
 	}

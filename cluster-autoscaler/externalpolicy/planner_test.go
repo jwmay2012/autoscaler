@@ -42,6 +42,12 @@ import (
 
 type preferGroup string
 
+func TestPlannerRejectsUnsupportedCSINodeSnapshots(t *testing.T) {
+	if _, err := NewPlanner(nil, config.AutoscalingOptions{CSINodeAwareSchedulingEnabled: true}, ""); err == nil {
+		t.Fatal("planner must not silently omit enabled CSI scheduling constraints")
+	}
+}
+
 func (p preferGroup) BestOption(options []expander.Option, _ map[string]*framework.NodeInfo) *expander.Option {
 	for i := range options {
 		if options[i].NodeGroup.Id() == string(p) {
