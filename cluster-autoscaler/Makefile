@@ -11,7 +11,7 @@ LDFLAGS?=-s
 ENVVAR=CGO_ENABLED=0
 GOOS?=linux
 GOARCH?=$(shell go env GOARCH)
-REGISTRY?=gcr.io/k8s-staging-autoscaling
+REGISTRY?=us-central1-docker.pkg.dev/k8s-staging-images/autoscaling
 DOCKER_NETWORK?=default
 SUPPORTED_BUILD_TAGS=$(shell ls cloudprovider/builder/ | grep -e '^builder_.*\.go' | sed 's/builder_\(.*\)\.go/\1/')
 ifdef BUILD_TAGS
@@ -73,6 +73,8 @@ make-image: make-image-arch-$(GOARCH)
 make-image-arch-%:
 	GOOS=$(GOOS) docker buildx build --pull --platform linux/$* \
 		--build-arg "GOARCH=$*" \
+		--build-arg "LDFLAGS_FLAG=${LDFLAGS_FLAG}" \
+		--build-arg "TAGS_FLAG=${TAGS_FLAG}" \
 		-t ${IMAGE}-$*:${TAG} \
 		-f Dockerfile .
 	@echo "Image ${TAG}${FOR_PROVIDER}-$* completed"

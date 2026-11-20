@@ -17,6 +17,7 @@ limitations under the License.
 package resourcequotas
 
 import (
+	"fmt"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider"
 	"k8s.io/autoscaler/cluster-autoscaler/context"
@@ -48,6 +49,34 @@ type Tracker struct {
 type quotaStatus struct {
 	quota      Quota
 	limitsLeft resourceList
+}
+
+// Remaining copies remaining resources, with separate keys for each quota.
+// Callers can plan against the copy without changing native scale-up accounting.
+func (t *Tracker) Remaining() map[string]int64 {
+	remaining := make(map[string]int64)
+	for _, qs := range t.quotaStatuses {
+		for resource, amount := range qs.limitsLeft {
+			remaining[fmt.Sprintf("%q/%q", qs.quota.ID(), resource)] = amount
+		}
+	}
+	return remaining
+}
+
+// DeltaForNode copies the resource charge for each quota matching this node.
+// Its keys match Remaining, including overlapping and node-scoped quotas.
+func (t *Tracker) DeltaForNode(autoscalingCtx *context.AutoscalingContext, group cloudprovider.NodeGroup, node *corev1.Node) (map[string]int64, error) {
+	delta, err := t.nodeCache.totalNodeResources(autoscalingCtx, node, group)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]int64)
+	for _, qs := range t.matchingQuotaStatuses(node) {
+		for resource := range qs.limitsLeft {
+			result[fmt.Sprintf("%q/%q", qs.quota.ID(), resource)] = delta[resource]
+		}
+	}
+	return result, nil
 }
 
 // newTracker creates a new Tracker.
